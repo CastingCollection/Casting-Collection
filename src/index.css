@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f5f0e8;
+    color: #1a1a1a;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #2a2a2a;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #C9A84C;
+    border-radius: 3px;
+  }
+}
+
+@layer components {
+  .btn-gold {
+    @apply bg-gold text-black font-semibold px-4 py-2 rounded hover:bg-gold-light transition-colors text-sm;
+  }
+  .btn-dark {
+    @apply bg-charcoal text-gold font-semibold px-4 py-2 rounded hover:bg-gray-700 transition-colors text-sm border border-gold/30;
+  }
+  .btn-danger {
+    @apply bg-red-700 text-white font-semibold px-4 py-2 rounded hover:bg-red-600 transition-colors text-sm;
+  }
+  .btn-ghost {
+    @apply text-gold border border-gold/40 px-3 py-1.5 rounded text-sm hover:bg-gold/10 transition-colors;
+  }
+  .input-field {
+    @apply bg-white border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gold/50 focus:border-gold w-full;
+  }
+  .card {
+    @apply bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden;
+  }
+  .section-header {
+    @apply text-xs font-bold uppercase tracking-wider text-gray-500 px-4 py-2 bg-gray-50 border-b border-gray-200;
+  }
+  .artist-card {
+    @apply bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow;
+  }
+  .modal-overlay {
+    @apply fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4;
+  }
+  .modal-box {
+    @apply bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold;
+  }
+  .sidebar-item {
+    @apply flex items-center gap-3 px-4 py-2.5 rounded-lg cursor-pointer transition-all text-sm font-medium;
+  }
+  .sidebar-item.active {
+    @apply bg-gold text-black;
+  }
+  .sidebar-item:not(.active) {
+    @apply text-gray-300 hover:bg-white/10 hover:text-white;
+  }
+}
