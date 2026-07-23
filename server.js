@@ -6,6 +6,7 @@ import puppeteer from 'puppeteer';
 import { createPool } from 'generic-pool';
 import ExcelJS from 'exceljs';
 import multer from 'multer';
+import zlib from 'zlib';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2145,6 +2146,176 @@ body{font-family:Arial,sans-serif;background:#fff;width:${PAGE_W}px}
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', 'attachment; filename="casting-presentation.pdf"');
   res.send(Buffer.from(pdf));
+}));
+
+// ── TEMPORARY: one-time legacy data migration endpoint ───────────────────────
+// Imports the real production SQLite data (dumped to migration_data/data.json.gz)
+// and the real uploaded images (migration_data/uploads/) into this Supabase
+// project. Protected by a secret env var. Delete this whole block (and the
+// migration_data/ folder) once the migration has run successfully and been
+// verified — this is not meant to stay in the app long-term.
+const MIGRATION_SECRET = process.env.MIGRATION_SECRET;
+const MIGRATION_DIR = path.join(__dirname, 'migration_data');
+
+let migrationState = { running: false, log: [], startedAt: null, finishedAt: null, error: null };
+
+function mlog(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  migrationState.log.push(line);
+  console.log('[migrate]', msg);
+}
+
+// Tables in FK-safe order for INSERT (parents before children).
+const MIGRATION_INSERT_ORDER = [
+  'productions', 'agents', 'roles', 'artists', 'call_sheets', 'banners',
+  'call_sheet_artists', 'pencil_dates', 'pencil_date_artists', 'fitting_dates',
+  'shoot_days', 'briefs', 'roles_to_fit', 'presentations', 'zcards', 'settings',
+];
+// Reverse order for wipe (children before parents).
+const MIGRATION_WIPE_ORDER = [...MIGRATION_INSERT_ORDER].reverse();
+
+// Columns per table that hold a legacy "/uploads/<filename>" path and need
+// rewriting to the new Supabase Storage public URL.
+const PATH_COLUMNS = {
+  productions: ['logo_path'],
+  call_sheets: ['logo_path'],
+  artists: ['headshot_path'],
+  zcards: ['photo1', 'photo2', 'photo3', 'photo4'],
+};
+const MOODBOARD_COLUMNS = { briefs: ['mood_board_images'] };
+
+function legacyFilename(value) {
+  if (!value || typeof value !== 'string') return null;
+  const m = value.match(/\/uploads\/([^/]+)$/);
+  return m ? m[1] : null;
+}
+
+function rewriteRow(table, row, urlMap) {
+  const out = { ...row };
+  for (const col of PATH_COLUMNS[table] || []) {
+    const fname = legacyFilename(out[col]);
+    out[col] = fname ? (urlMap[fname] || null) : (out[col] || null);
+  }
+  for (const col of MOODBOARD_COLUMNS[table] || []) {
+    if (!out[col]) continue;
+    try {
+      const arr = JSON.parse(out[col]);
+      if (Array.isArray(arr)) {
+        out[col] = JSON.stringify(
+          arr.map(v => { const f = legacyFilename(v); return f ? urlMap[f] : null; }).filter(Boolean)
+        );
+      }
+    } catch { /* leave as-is if not valid JSON */ }
+  }
+  return out;
+}
+
+async function insertTableRows(table, rows, urlMap) {
+  if (!rows || rows.length === 0) { mlog(`${table}: 0 rows, skipped`); return; }
+  const mapped = rows.map(r => rewriteRow(table, r, urlMap));
+  const BATCH = 500;
+  let ok = 0, failed = 0;
+  for (let i = 0; i < mapped.length; i += BATCH) {
+    const chunk = mapped.slice(i, i + BATCH);
+    const { error } = await supabase.from(table).insert(chunk);
+    if (!error) { ok += chunk.length; continue; }
+    // Batch failed — retry rows one at a time so we can pinpoint the bad one(s).
+    mlog(`${table}: batch [${i}-${i + chunk.length}) failed (${error.message}), retrying row-by-row`);
+    for (const row of chunk) {
+      const { error: rowErr } = await supabase.from(table).insert(row);
+      if (rowErr) { failed++; mlog(`${table}: row id=${row.id ?? '?'} FAILED: ${rowErr.message}`); }
+      else ok++;
+    }
+  }
+  mlog(`${table}: inserted ${ok}/${rows.length}${failed ? `, ${failed} failed` : ''}`);
+}
+
+async function wipeTable(table) {
+  // delete everything — .neq on a column that's always true-ish isn't available,
+  // so match all rows via "id is not null" equivalent using gte 0 for int PKs,
+  // and a catch-all for the text-keyed settings table.
+  const col = table === 'settings' ? 'key' : 'id';
+  const { error } = await supabase.from(table).delete().not(col, 'is', null);
+  if (error) mlog(`wipe ${table} FAILED: ${error.message}`);
+  else mlog(`wiped ${table}`);
+}
+
+async function runMigration(doWipe) {
+  try {
+    await ensureMediaBucket();
+
+    mlog('reading migration_data/data.json.gz ...');
+    const gz = fs.readFileSync(path.join(MIGRATION_DIR, 'data.json.gz'));
+    const dump = JSON.parse(zlib.gunzipSync(gz).toString('utf8'));
+    mlog('dump loaded: ' + Object.keys(dump).map(k => `${k}=${dump[k].length}`).join(', '));
+
+    if (doWipe) {
+      mlog('wiping existing rows before import ...');
+      for (const t of MIGRATION_WIPE_ORDER) await wipeTable(t);
+    }
+
+    mlog('uploading images to Supabase Storage ...');
+    const uploadsDir = path.join(MIGRATION_DIR, 'uploads');
+    const files = fs.readdirSync(uploadsDir);
+    const urlMap = {};
+    let uploaded = 0, upFailed = 0;
+    for (const filename of files) {
+      try {
+        const buf = fs.readFileSync(path.join(uploadsDir, filename));
+        const ext = path.extname(filename).toLowerCase();
+        const contentType = ext === '.png' ? 'image/png'
+          : (ext === '.jpg' || ext === '.jpeg') ? 'image/jpeg'
+          : ext === '.webp' ? 'image/webp'
+          : 'application/octet-stream';
+        const objectPath = `legacy/${filename}`;
+        const { error } = await supabase.storage.from(MEDIA_BUCKET).upload(objectPath, buf, { contentType, upsert: true });
+        if (error) { upFailed++; mlog(`image upload FAILED ${filename}: ${error.message}`); continue; }
+        const { data } = supabase.storage.from(MEDIA_BUCKET).getPublicUrl(objectPath);
+        urlMap[filename] = data.publicUrl;
+        uploaded++;
+        if (uploaded % 200 === 0) mlog(`... ${uploaded}/${files.length} images uploaded`);
+      } catch (e) {
+        upFailed++; mlog(`image upload EXCEPTION ${filename}: ${e.message}`);
+      }
+    }
+    mlog(`images done: uploaded=${uploaded} failed=${upFailed} total=${files.length}`);
+
+    for (const table of MIGRATION_INSERT_ORDER) {
+      await insertTableRows(table, dump[table], urlMap);
+    }
+
+    mlog('resetting identity sequences ...');
+    const { error: rpcErr } = await supabase.rpc('migration_reset_sequences');
+    if (rpcErr) mlog('sequence reset FAILED (run the SQL manually): ' + rpcErr.message);
+    else mlog('sequences reset OK');
+
+    mlog('MIGRATION COMPLETE');
+  } catch (e) {
+    migrationState.error = e.message;
+    mlog('FATAL: ' + e.message);
+  } finally {
+    migrationState.running = false;
+    migrationState.finishedAt = new Date().toISOString();
+  }
+}
+
+app.get('/api/admin/migrate-legacy', ah(async (req, res) => {
+  if (!MIGRATION_SECRET || req.query.secret !== MIGRATION_SECRET) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  if (migrationState.running) {
+    return res.status(409).json({ error: 'already running', state: migrationState });
+  }
+  migrationState = { running: true, log: [], startedAt: new Date().toISOString(), finishedAt: null, error: null };
+  res.json({ ok: true, message: 'Migration started. Poll /api/admin/migrate-status?secret=... for progress.' });
+  runMigration(req.query.confirm === 'WIPE');
+}));
+
+app.get('/api/admin/migrate-status', ah(async (req, res) => {
+  if (!MIGRATION_SECRET || req.query.secret !== MIGRATION_SECRET) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  res.json(migrationState);
 }));
 
 // ── SPA fallback (serve dist in prod) ────────────────────────────────────────
