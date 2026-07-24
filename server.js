@@ -93,6 +93,48 @@ function resolveImageUrl(value) {
   return null;
 }
 
+// Fetches an image URL server-side (Node) and returns it as a data: URI, so
+// Chromium never has to make its own network request for it at all. This is
+// the real fix for large rosters being slow, not just a bigger timeout:
+// Chromium enforces a per-host connection concurrency cap (~6 simultaneous
+// requests), so a page with ~195 <img> tags queues most of them behind each
+// other one by one. Node's fetch has no such cap, so we can pull many images
+// down in parallel here in one batch — in practice this turns "195 images,
+// mostly serialized" into "195 images, ~16 at a time," which is the actual
+// speedup (not just a longer grace period before giving up).
+async function fetchAsDataUri(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    const type = res.headers.get('content-type') || 'image/jpeg';
+    return `data:${type};base64,${buf.toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
+
+// Inlines a batch of image URLs as data: URIs with bounded concurrency.
+// Returns a Map from original URL -> data URI. If a particular image fails to
+// fetch, its map entry falls back to the original URL so one bad photo can't
+// break the rest of the document (it'll just render as a broken image, same
+// as before this optimization existed).
+async function inlineImages(urls, concurrency = 16) {
+  const unique = [...new Set(urls.filter(Boolean))];
+  const map = new Map();
+  let i = 0;
+  async function worker() {
+    while (i < unique.length) {
+      const url = unique[i++];
+      if (url.startsWith('data:')) { map.set(url, url); continue; }
+      const dataUri = await fetchAsDataUri(url);
+      map.set(url, dataUri || url);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, unique.length)) }, worker));
+  return map;
+}
+
 // ── Puppeteer browser pool ────────────────────────────────────────────────────
 // One warm browser stays alive between PDF requests — no cold-start Chromium per export.
 // --disable-dev-shm-usage is the standard fix for Chromium crashing in
@@ -1673,6 +1715,15 @@ app.get('/api/call-sheets/:id/roster/pdf', ah(async (req, res) => {
   const S = await getSettings();
   const logoUrl = resolveImageUrl(sheet.logo_path || S.app_logo_path);
 
+  // Prefetch every artist photo (+ logo) server-side and embed as data: URIs
+  // instead of leaving Chromium to fetch ~195 <img src> URLs itself over the
+  // network — see fetchAsDataUri/inlineImages above for why this is the real
+  // fix for roster slowness, not just a bigger timeout.
+  const t0 = Date.now();
+  const imageMap = await inlineImages([logoUrl, ...allArtists.map(a => resolveImageUrl(a.headshot_path))]);
+  console.log(`[roster pdf] inlineImages: ${Date.now() - t0}ms (${imageMap.size} unique images)`);
+  const inlinedLogoUrl = logoUrl ? (imageMap.get(logoUrl) || logoUrl) : null;
+
   const TYPE_LABELS = { pencil: 'Pencil', fitting: 'Fitting', shoot: 'Shoot', other: 'Other' };
   const fmtD = iso => {
     if (!iso) return '';
@@ -1687,7 +1738,8 @@ app.get('/api/call-sheets/:id/roster/pdf', ah(async (req, res) => {
   };
 
   const makeCard = a => {
-    const photoUrl = resolveImageUrl(a.headshot_path);
+    const rawPhotoUrl = resolveImageUrl(a.headshot_path);
+    const photoUrl = rawPhotoUrl ? (imageMap.get(rawPhotoUrl) || rawPhotoUrl) : null;
     const name = `${a.first_name} ${a.last_name || ''}`.trim();
     const dates = fmtDates(a.additional_dates);
     return `<div class="artist-card">
@@ -1745,7 +1797,7 @@ body{font-family:Arial,sans-serif;font-size:10px;background:#fff;padding:6px 14p
 .footer{text-align:center;font-size:8px;border-top:1px solid #ccc;margin-top:14px;padding-top:6px;color:#666}
 </style></head><body>
 <div class="hdr">
-  <div class="hdr-logo">${logoUrl ? `<img src="${logoUrl}">` : `<span style="font-size:14px;font-weight:900">${esc(S.app_production||'')}</span>`}</div>
+  <div class="hdr-logo">${inlinedLogoUrl ? `<img src="${inlinedLogoUrl}">` : `<span style="font-size:14px;font-weight:900">${esc(S.app_production||'')}</span>`}</div>
   <div class="hdr-center">
     <div class="cs-title">${esc(sheet.title || '')}</div>
     <div class="cs-sub">Artist Roster</div>
@@ -1766,10 +1818,11 @@ ${sectionsHTML}
     let t = Date.now();
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
     console.log(`[roster pdf] setContent: ${Date.now() - t}ms`); t = Date.now();
-    // Rosters can have 100s of artist photos, well beyond the default
-    // waitForImages() budget's assumptions — give each image up to 25s to
-    // actually get a connection slot and load instead of giving up early.
-    await waitForImages(page, 25000);
+    // Photos are already embedded as data: URIs at this point (see
+    // inlineImages() above), so this just waits for Chromium to decode/paint
+    // them locally — no network involved, so it should resolve in well under
+    // a second per image rather than needing a long per-image budget.
+    await waitForImages(page, 5000);
     console.log(`[roster pdf] waitForImages: ${Date.now() - t}ms`); t = Date.now();
     const buf = await page.pdf({ format: 'A4', printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
     console.log(`[roster pdf] page.pdf: ${Date.now() - t}ms`);
