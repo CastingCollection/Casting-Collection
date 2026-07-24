@@ -37,28 +37,41 @@ async function req(method, url, body) {
 // normal link click to these URLs would 401 now that the backend requires
 // auth on every /api/* route). This fetches the file WITH the bearer token,
 // then triggers a client-side download via a temporary object URL.
+//
+// Most callers fire this from onClick={() => api.someExportUrl(id)} without
+// awaiting or catching — that's normal for a "download on click" button, but
+// it means an unhandled rejection here previously just vanished (the button
+// looked like it did nothing). So this always surfaces failures with an
+// alert before rethrowing, so the handful of callers that DO await + catch
+// (e.g. CastingBriefs' save-and-download flow) still get the real error too.
 async function downloadFile(url, filename) {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
-  const headers = {};
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(url, { headers });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    const e = new Error(err.error || 'Download failed');
-    e.status = res.status;
-    throw e;
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      const e = new Error(err.error || 'Download failed');
+      e.status = res.status;
+      throw e;
+    }
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = filename || '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+  } catch (err) {
+    console.error('[download failed]', url, err);
+    alert(`Download failed: ${err.message || err}`);
+    throw err;
   }
-  const blob = await res.blob();
-  const blobUrl = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = blobUrl;
-  a.download = filename || '';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
 }
 
 // Fetches a URL that requires the Authorization header and returns a
