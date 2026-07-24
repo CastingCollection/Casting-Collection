@@ -96,7 +96,14 @@ function resolveImageUrl(value) {
 
 // ── Puppeteer browser pool ────────────────────────────────────────────────────
 // One warm browser stays alive between PDF requests — no cold-start Chromium per export.
-const BROWSER_ARGS = ['--no-sandbox', '--disable-setuid-sandbox', '--allow-file-access-from-files'];
+// --disable-dev-shm-usage is the standard fix for Chromium crashing in
+// containerized hosts (Render, Docker, CI): /dev/shm is often tiny there
+// (frequently 64MB) and Chrome uses it heavily for rendering, so a
+// heavier page (more/larger images — e.g. a full roster PDF vs. a single
+// call sheet) can crash the whole browser (and take the Node process down
+// with it) rather than just rendering slowly. --disable-gpu is the other
+// standard companion flag for headless rendering in these environments.
+const BROWSER_ARGS = ['--no-sandbox', '--disable-setuid-sandbox', '--allow-file-access-from-files', '--disable-dev-shm-usage', '--disable-gpu'];
 const browserPool = createPool({
   create:    () => puppeteer.launch({ headless: true, args: BROWSER_ARGS }),
   destroy:   (b) => b.close().catch(() => {}),
