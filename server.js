@@ -105,17 +105,32 @@ const browserPool = createPool({
 
 // Helper: acquire a browser from the pool, open a page, run fn(page), then clean up.
 // If anything goes wrong the browser is destroyed (not returned) so the pool creates a fresh one.
-async function withPage(fn) {
-  const browser = await browserPool.acquire();
-  const page = await browser.newPage();
+//
+// Wrapped in a hard deadline: previously a stuck page.setContent/pdf() call
+// (e.g. Puppeteer's networkidle0 wait never settling because a remote image
+// fetch stalls instead of cleanly failing) could hang the request forever —
+// no error, no timeout, the client's fetch() just waits indefinitely. This
+// guarantees SOME response within timeoutMs no matter what's stuck inside.
+async function withPage(fn, timeoutMs = 25000) {
+  let browser, page;
+  const work = (async () => {
+    browser = await browserPool.acquire();
+    page = await browser.newPage();
+    return await fn(page);
+  })();
+  const deadline = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(`PDF generation timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
   try {
-    const result = await fn(page);
+    const result = await Promise.race([work, deadline]);
     await page.close().catch(() => {});
     await browserPool.release(browser);
     return result;
   } catch (err) {
-    await page.close().catch(() => {});
-    await browserPool.destroy(browser).catch(() => {});
+    // If `browser` never got assigned, acquire() itself is what's stuck/failed
+    // — nothing to close or destroy here, the pool manages that timeout itself.
+    if (page) await page.close().catch(() => {});
+    if (browser) await browserPool.destroy(browser).catch(() => {});
     throw err;
   }
 }
