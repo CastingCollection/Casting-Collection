@@ -1760,7 +1760,7 @@ ${sectionsHTML}
     const buf = await page.pdf({ format: 'A4', printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
     console.log(`[roster pdf] page.pdf: ${Date.now() - t}ms`);
     return buf;
-  });
+  }, 90000); // larger rosters (100s of artist photos) can genuinely take longer to rasterize than a single call sheet
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(Buffer.from(pdf));
