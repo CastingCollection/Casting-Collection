@@ -122,6 +122,11 @@ async function withPage(fn, timeoutMs = 45000) {
   const work = (async () => {
     browser = await browserPool.acquire();
     page = await browser.newPage();
+    // Puppeteer's own default protocol timeout (30s) is separate from — and
+    // was firing well before — our own outer deadline below. Without this,
+    // page.pdf() (and any other page operation) errors out at 30s no matter
+    // how generous timeoutMs is set to.
+    page.setDefaultTimeout(timeoutMs);
     return await fn(page);
   })();
   const deadline = new Promise((_, reject) => {
@@ -148,7 +153,13 @@ async function withPage(fn, timeoutMs = 45000) {
 // now that headshots load from Supabase Storage over the real internet
 // instead of instantly from local disk — blocks page.setContent() forever.
 // Per-image timeouts mean one bad image just renders broken, not a hung PDF.
-async function waitForImages(page, perImageTimeoutMs = 8000) {
+// Default raised from 8000ms: with ~195 images on a large roster, the browser's
+// per-host connection concurrency limit (~6 simultaneous requests) queues most
+// images behind each other. An 8s per-image timer meant most images never got a
+// connection slot before giving up, making waitForImages() consistently finish
+// in ~8-9s (i.e. nearly every image "gave up" rather than genuinely loaded). A
+// longer per-image budget gives queued images realistic time to actually load.
+async function waitForImages(page, perImageTimeoutMs = 20000) {
   await page.evaluate((timeoutMs) => {
     const imgs = Array.from(document.images);
     return Promise.all(imgs.map(img => {
@@ -1755,12 +1766,15 @@ ${sectionsHTML}
     let t = Date.now();
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
     console.log(`[roster pdf] setContent: ${Date.now() - t}ms`); t = Date.now();
-    await waitForImages(page);
+    // Rosters can have 100s of artist photos, well beyond the default
+    // waitForImages() budget's assumptions — give each image up to 25s to
+    // actually get a connection slot and load instead of giving up early.
+    await waitForImages(page, 25000);
     console.log(`[roster pdf] waitForImages: ${Date.now() - t}ms`); t = Date.now();
     const buf = await page.pdf({ format: 'A4', printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
     console.log(`[roster pdf] page.pdf: ${Date.now() - t}ms`);
     return buf;
-  }, 90000); // larger rosters (100s of artist photos) can genuinely take longer to rasterize than a single call sheet
+  }, 120000); // larger rosters (100s of artist photos) can genuinely take longer to rasterize than a single call sheet
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(Buffer.from(pdf));
