@@ -142,6 +142,28 @@ function checkErr(res, error) {
   return false;
 }
 
+// PostgREST (Supabase's REST layer) silently caps any query at 1000 rows
+// unless you page through it with .range() — a plain .select() on a table
+// with >1000 rows quietly returns only the first 1000, which is exactly the
+// kind of bug that a small local SQLite dataset never surfaces but real
+// production data (1,367 artists, 1,730 call-sheet assignments, etc.) does.
+// `build` must be a function returning a *fresh* query builder each call
+// (Supabase builders are single-use once awaited), so this can re-invoke it
+// per page with .range() appended.
+const PAGE_SIZE = 1000;
+async function selectAll(build) {
+  let all = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await build().range(from, from + PAGE_SIZE - 1);
+    if (error) return { data: null, error };
+    all = all.concat(data || []);
+    if (!data || data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return { data: all, error: null };
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(s) {
   if (s == null) return '';
@@ -433,7 +455,8 @@ app.get('/api/agents', ah(async (_req, res) => {
 }));
 
 app.get('/api/roles', ah(async (_req, res) => {
-  const { data, error } = await supabase.from('artists').select('role').not('role', 'is', null).neq('role', '');
+  const { data, error } = await selectAll(() => supabase.from('artists').select('role').order('id')
+    .not('role', 'is', null).neq('role', ''));
   if (checkErr(res, error)) return;
   const roles = [...new Set((data || []).map(r => r.role))].sort((a, b) => a.localeCompare(b));
   res.json(roles);
@@ -490,10 +513,12 @@ const ARTIST_WRITABLE_FIELDS = [
 // full-text search (or an .rpc() function) instead.
 app.get('/api/artists', ah(async (req, res) => {
   const { category, q, role } = req.query;
-  let query = supabase.from('artists').select('*');
-  if (category) query = query.eq('category', category);
-  if (role) query = query.eq('role', role);
-  const { data, error } = await query;
+  const { data, error } = await selectAll(() => {
+    let query = supabase.from('artists').select('*').order('id');
+    if (category) query = query.eq('category', category);
+    if (role) query = query.eq('role', role);
+    return query;
+  });
   if (checkErr(res, error)) return;
   let rows = data || [];
   if (!role && q) {
@@ -508,7 +533,7 @@ app.get('/api/artists', ah(async (req, res) => {
 }));
 
 app.get('/api/artists/counts', ah(async (_req, res) => {
-  const { data, error } = await supabase.from('artists').select('category');
+  const { data, error } = await selectAll(() => supabase.from('artists').select('category').order('id'));
   if (checkErr(res, error)) return;
   const counts = {};
   (data || []).forEach(r => { counts[r.category] = (counts[r.category] || 0) + 1; });
@@ -519,8 +544,8 @@ app.get('/api/artists/counts', ah(async (_req, res) => {
 // Returns artists grouped by additional_dates entries of a given type (pencil/fitting/shoot)
 app.get('/api/artists/dates-by-type/:type', ah(async (req, res) => {
   const type = req.params.type;
-  const { data, error } = await supabase.from('artists').select('*')
-    .not('additional_dates', 'is', null).neq('additional_dates', '[]').neq('additional_dates', '');
+  const { data, error } = await selectAll(() => supabase.from('artists').select('*')
+    .not('additional_dates', 'is', null).neq('additional_dates', '[]').neq('additional_dates', '').order('id'));
   if (checkErr(res, error)) return;
   const groups = {};
   (data || []).forEach(artist => {
@@ -540,8 +565,8 @@ app.get('/api/artists/dates-by-type/:type', ah(async (req, res) => {
 }));
 
 app.get('/api/artists/export-all', ah(async (req, res) => {
-  const { data: rows, error } = await supabase.from('artists').select('*')
-    .order('category').order('first_name').order('last_name');
+  const { data: rows, error } = await selectAll(() => supabase.from('artists').select('*')
+    .order('category').order('first_name').order('last_name').order('id'));
   if (checkErr(res, error)) return;
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('All Artists');
@@ -936,8 +961,8 @@ app.get('/api/call-sheets', ah(async (req, res) => {
 
   const ids = sheets.map(s => s.id);
   const [{ data: allBanners, error: bErr }, { data: allArtistsRaw, error: aErr }] = await Promise.all([
-    supabase.from('banners').select('*').in('call_sheet_id', ids).order('sort_order').order('id'),
-    supabase.from('call_sheet_artists').select(`*, artists(${CSA_ARTIST_FIELDS})`).in('call_sheet_id', ids),
+    selectAll(() => supabase.from('banners').select('*').in('call_sheet_id', ids).order('sort_order').order('id')),
+    selectAll(() => supabase.from('call_sheet_artists').select(`*, artists(${CSA_ARTIST_FIELDS})`).in('call_sheet_id', ids).order('id')),
   ]);
   if (checkErr(res, bErr) || checkErr(res, aErr)) return;
 
@@ -1344,10 +1369,10 @@ app.post('/api/briefs/:id/moodboard', upload.array('images', 20), ah(async (req,
 // whose category is 'shoot' AND who has zero call_sheet_artists rows at all).
 app.get('/api/roles-to-fit', ah(async (_req, res) => {
   const [{ data: rtfRows, error: e1 }, { data: artistRows, error: e2 }, { data: csaRows, error: e3 }, { data: csRows, error: e4 }] = await Promise.all([
-    supabase.from('roles_to_fit').select('*'),
-    supabase.from('artists').select('id, role, category'),
-    supabase.from('call_sheet_artists').select('artist_id, call_sheet_id'),
-    supabase.from('call_sheets').select('id, type'),
+    selectAll(() => supabase.from('roles_to_fit').select('*').order('id')),
+    selectAll(() => supabase.from('artists').select('id, role, category').order('id')),
+    selectAll(() => supabase.from('call_sheet_artists').select('artist_id, call_sheet_id').order('id')),
+    selectAll(() => supabase.from('call_sheets').select('id, type').order('id')),
   ]);
   if (checkErr(res, e1) || checkErr(res, e2) || checkErr(res, e3) || checkErr(res, e4)) return;
 
@@ -1422,10 +1447,10 @@ app.get('/api/calendar', ah(async (_req, res) => {
   const ids = allSheets.map(s => s.id);
   const CAL_ARTIST_FIELDS = 'id,first_name,last_name,agent_name,role,phone,email,headshot_path,day_rate,fitting_rate,category';
   const [{ data: allBanners, error: bErr }, { data: allArtistsRaw, error: aErr }] = await Promise.all([
-    supabase.from('banners').select('*').in('call_sheet_id', ids).order('sort_order').order('id'),
-    supabase.from('call_sheet_artists')
+    selectAll(() => supabase.from('banners').select('*').in('call_sheet_id', ids).order('sort_order').order('id')),
+    selectAll(() => supabase.from('call_sheet_artists')
       .select(`call_sheet_id,banner_id,call_time,report_to,pickup_point,pickup_time,notes,artists(${CAL_ARTIST_FIELDS})`)
-      .in('call_sheet_id', ids),
+      .in('call_sheet_id', ids).order('call_sheet_id').order('artist_id')),
   ]);
   if (checkErr(res, bErr) || checkErr(res, aErr)) return;
 
