@@ -135,6 +135,28 @@ async function withPage(fn, timeoutMs = 25000) {
   }
 }
 
+// Waits for every <img> on the page to either finish loading or fail, each
+// capped at its own short timeout — used instead of `waitUntil: 'networkidle0'`
+// for PDF rendering. networkidle0 requires ALL network activity to go quiet,
+// so a single image that stalls (rather than cleanly erroring) — plausible
+// now that headshots load from Supabase Storage over the real internet
+// instead of instantly from local disk — blocks page.setContent() forever.
+// Per-image timeouts mean one bad image just renders broken, not a hung PDF.
+async function waitForImages(page, perImageTimeoutMs = 8000) {
+  await page.evaluate((timeoutMs) => {
+    const imgs = Array.from(document.images);
+    return Promise.all(imgs.map(img => {
+      if (img.complete) return Promise.resolve();
+      return new Promise(resolve => {
+        const done = () => resolve();
+        img.addEventListener('load', done, { once: true });
+        img.addEventListener('error', done, { once: true });
+        setTimeout(done, timeoutMs);
+      });
+    }));
+  }, perImageTimeoutMs);
+}
+
 // ── Request helpers ───────────────────────────────────────────────────────────
 // supabase-js never throws on query errors — it resolves { data, error } — so
 // every call site must check `error` explicitly. `ah()` also catches any
@@ -1893,7 +1915,8 @@ ${sectionsHTML}
 
   const filename = `roster-${(sheet.title||'sheet').replace(/[^a-z0-9]/gi,'-')}.pdf`.toLowerCase();
   const pdf = await withPage(async page => {
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    await waitForImages(page);
     return page.pdf({ format: 'A4', printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
   });
   res.setHeader('Content-Type', 'application/pdf');
@@ -1916,7 +1939,8 @@ app.get('/api/call-sheets/:id/pdf', ah(async (req, res) => {
   const S = await getSettings();
   const filename = `call-sheet-${(sheet.title||sheet.id).replace(/[^a-z0-9]/gi,'-').toLowerCase()}.pdf`;
   const pdf = await withPage(async page => {
-    await page.setContent(buildCallSheetHTML(enriched, sheet.type, S), { waitUntil: 'networkidle0' });
+    await page.setContent(buildCallSheetHTML(enriched, sheet.type, S), { waitUntil: 'domcontentloaded' });
+    await waitForImages(page);
     return page.pdf({ format: 'A4', landscape: true, printBackground: true,
       margin: { top:'8mm', bottom:'8mm', left:'8mm', right:'8mm' } });
   });
@@ -2065,7 +2089,8 @@ ${moodHtml ? (() => {
 </body></html>`;
 
   const pdf = await withPage(async page => {
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    await waitForImages(page);
     return page.pdf({ format: 'A4', printBackground: true,
       margin: { top:'15mm', bottom:'15mm', left:'15mm', right:'15mm' } });
   });
@@ -2219,7 +2244,8 @@ body{font-family:Arial,sans-serif;background:#0d0d0d;width:297mm;height:210mm;ov
 </body></html>`;
 
     const pdf = await withPage(async page => {
-      await page.setContent(html, { waitUntil: 'networkidle0' });
+      await page.setContent(html, { waitUntil: 'domcontentloaded' });
+      await waitForImages(page);
       return page.pdf({ format: 'A4', landscape: true, printBackground: true, margin: { top:0, bottom:0, left:0, right:0 } });
     });
     res.setHeader('Content-Type', 'application/pdf');
@@ -2349,7 +2375,8 @@ body{font-family:Arial,sans-serif;background:#fff;width:${PAGE_W}px}
 
   const pdf = await withPage(async page => {
     await page.setViewport({ width: PAGE_W, height: PAGE_H });
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 });
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    await waitForImages(page);
     return page.pdf({ format: 'A3', landscape: true, printBackground: true,
       margin: { top: '0', bottom: '0', left: '0', right: '0' } });
   });
