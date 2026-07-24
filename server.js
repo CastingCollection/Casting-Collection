@@ -7,6 +7,7 @@ import { createPool } from 'generic-pool';
 import ExcelJS from 'exceljs';
 import multer from 'multer';
 import zlib from 'zlib';
+import sharp from 'sharp';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -103,12 +104,38 @@ function resolveImageUrl(value) {
 // down in parallel here in one batch — in practice this turns "195 images,
 // mostly serialized" into "195 images, ~16 at a time," which is the actual
 // speedup (not just a longer grace period before giving up).
+//
+// Also downsizes every photo via sharp before embedding it. This matters even
+// more than the fetch speedup: Chromium has to decode each embedded image to
+// its FULL pixel dimensions to paint it, even though a roster card only
+// displays it as a small thumbnail. A single modern phone photo can be
+// 3000x4000px — a ~48MB raw bitmap once decoded — and rendering ~195 of
+// those at once is enough to exhaust a hosted container's memory and crash
+// the whole Node process (this is what happened on shootday 20's ~195-artist
+// roster: the process restarted mid-request rather than the request just
+// timing out). Resizing to roster-thumbnail resolution first keeps both the
+// embedded HTML size and Chromium's decoded memory footprint small,
+// regardless of how large the original uploaded photo was.
 async function fetchAsDataUri(url) {
   try {
     const res = await fetch(url);
     if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    const type = res.headers.get('content-type') || 'image/jpeg';
+    let buf = Buffer.from(await res.arrayBuffer());
+    let type = res.headers.get('content-type') || 'image/jpeg';
+    if (type.startsWith('image/') && type !== 'image/svg+xml') {
+      try {
+        // 480px wide is generously larger than these ever render at in the
+        // PDF grid (4 columns on an A4 page), even accounting for print DPI.
+        // .rotate() with no args auto-applies the image's EXIF orientation
+        // (common on phone photos) before resizing/re-encoding strips it.
+        buf = await sharp(buf).rotate().resize({ width: 480, withoutEnlargement: true }).jpeg({ quality: 72 }).toBuffer();
+        type = 'image/jpeg';
+      } catch {
+        // Not every file sharp can decode (corrupt upload, unusual format,
+        // etc.) — fall back to embedding the original bytes rather than
+        // dropping the photo entirely.
+      }
+    }
     return `data:${type};base64,${buf.toString('base64')}`;
   } catch {
     return null;
@@ -119,8 +146,11 @@ async function fetchAsDataUri(url) {
 // Returns a Map from original URL -> data URI. If a particular image fails to
 // fetch, its map entry falls back to the original URL so one bad photo can't
 // break the rest of the document (it'll just render as a broken image, same
-// as before this optimization existed).
-async function inlineImages(urls, concurrency = 16) {
+// as before this optimization existed). Concurrency is deliberately modest
+// (not e.g. 32+): each in-flight worker briefly holds a full-resolution image
+// buffer in memory before sharp shrinks it, so a very high number here would
+// reintroduce the same kind of memory spike this function exists to avoid.
+async function inlineImages(urls, concurrency = 8) {
   const unique = [...new Set(urls.filter(Boolean))];
   const map = new Map();
   let i = 0;
