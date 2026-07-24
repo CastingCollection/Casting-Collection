@@ -1,15 +1,20 @@
 import { useState } from 'react';
 import { supabase } from '../supabaseClient.js';
 
-// Minimal sign-in screen for the 3-person team. There is intentionally no
-// sign-up form and no "forgot password" flow — accounts are created directly
-// in the Supabase dashboard by the app owner, so this only ever needs to
-// authenticate an existing user.
+// Sign-in screen for the small team. There is intentionally no sign-up form
+// — accounts are created directly in the Supabase dashboard by the app
+// owner — but "Forgot password?" is self-service: it sends a Supabase
+// recovery email whose link lands back on this app at ResetPassword.jsx.
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  const [showReset, setShowReset] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+  const [resetError, setResetError] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -22,6 +27,25 @@ export default function Login() {
     }
     // On success, the onAuthStateChange listener in AuthGate picks up the new
     // session and swaps this screen out for the app automatically.
+  }
+
+  async function handleResetRequest(e) {
+    e.preventDefault();
+    setResetError('');
+    if (!email) {
+      setResetError('Enter your email above first, then click "Forgot password?" again.');
+      return;
+    }
+    setResetLoading(true);
+    const { error: resetErr } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+    setResetLoading(false);
+    if (resetErr) {
+      setResetError(resetErr.message || 'Could not send reset email.');
+      return;
+    }
+    setResetSent(true);
   }
 
   return (
@@ -77,6 +101,41 @@ export default function Login() {
             {loading ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
+
+        <div className="mt-4 text-center">
+          {!showReset ? (
+            <button
+              type="button"
+              onClick={() => { setShowReset(true); setResetSent(false); setResetError(''); }}
+              className="text-xs text-gray-400 underline hover:text-gray-300"
+            >
+              Forgot password?
+            </button>
+          ) : resetSent ? (
+            <p className="text-xs text-gray-400">
+              Check <span className="text-gray-300">{email}</span> for a reset link.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-gray-400">
+                We'll email a reset link to the address entered above.
+              </p>
+              {resetError && (
+                <p className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 font-mono text-xs text-red-400">
+                  {resetError}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={handleResetRequest}
+                disabled={resetLoading}
+                className="text-xs font-medium text-blue-400 underline hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {resetLoading ? 'Sending…' : 'Send reset email'}
+              </button>
+            </div>
+          )}
+        </div>
 
         <p className="mt-6 text-xs text-gray-500">
           Accounts are created by the app owner — contact them if you need access.
