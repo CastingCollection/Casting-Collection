@@ -118,7 +118,7 @@ const browserPool = createPool({
 // fetch stalls instead of cleanly failing) could hang the request forever —
 // no error, no timeout, the client's fetch() just waits indefinitely. This
 // guarantees SOME response within timeoutMs no matter what's stuck inside.
-async function withPage(fn, timeoutMs = 25000) {
+async function withPage(fn, timeoutMs = 45000) {
   let browser, page;
   const work = (async () => {
     browser = await browserPool.acquire();
@@ -1921,10 +1921,16 @@ ${sectionsHTML}
 </body></html>`;
 
   const filename = `roster-${(sheet.title||'sheet').replace(/[^a-z0-9]/gi,'-')}.pdf`.toLowerCase();
+  console.log(`[roster pdf] sheet=${sheet.id} artists=${allArtists.length} html_bytes=${html.length}`);
   const pdf = await withPage(async page => {
+    let t = Date.now();
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    console.log(`[roster pdf] setContent: ${Date.now() - t}ms`); t = Date.now();
     await waitForImages(page);
-    return page.pdf({ format: 'A4', printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
+    console.log(`[roster pdf] waitForImages: ${Date.now() - t}ms`); t = Date.now();
+    const buf = await page.pdf({ format: 'A4', printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
+    console.log(`[roster pdf] page.pdf: ${Date.now() - t}ms`);
+    return buf;
   });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
