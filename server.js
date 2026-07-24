@@ -6,7 +6,6 @@ import puppeteer from 'puppeteer';
 import { createPool } from 'generic-pool';
 import ExcelJS from 'exceljs';
 import multer from 'multer';
-import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -204,43 +203,6 @@ async function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Invalid or expired session' });
   }
 }
-// ── TEMPORARY: admin "set a temporary password" endpoint ─────────────────────
-// Registered BEFORE requireAuth below so it is NOT gated behind a logged-in
-// Supabase session (that would be circular — the whole point is to get back
-// in when you can't sign in). It has its own secret-based check instead.
-// Supabase's built-in auth email service has a very low rate limit (a few
-// emails/hour), so the normal "forgot password" email flow can get rate
-// limited. This gives the app owner a way to get back in immediately using
-// the service_role key's admin powers, with no email involved. Safe to
-// remove once a real SMTP provider is configured in Supabase (Authentication
-// → Settings → SMTP Settings) and this is no longer needed as a fallback.
-const ADMIN_SECRET = process.env.ADMIN_SECRET;
-
-app.get('/api/admin/set-temp-password', ah(async (req, res) => {
-  if (!ADMIN_SECRET || req.query.secret !== ADMIN_SECRET) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  const email = (req.query.email || '').toLowerCase().trim();
-  if (!email) return res.status(400).json({ error: 'pass ?email=you@example.com' });
-
-  const { data, error } = await supabase.auth.admin.listUsers({ perPage: 1000 });
-  if (error) return res.status(500).json({ error: error.message });
-
-  const user = (data.users || []).find(u => (u.email || '').toLowerCase() === email);
-  if (!user) return res.status(404).json({ error: `no account found for ${email}` });
-
-  const tempPassword = crypto.randomBytes(9).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 14);
-  const { error: updateErr } = await supabase.auth.admin.updateUserById(user.id, { password: tempPassword });
-  if (updateErr) return res.status(500).json({ error: updateErr.message });
-
-  res.json({
-    ok: true,
-    email,
-    tempPassword,
-    note: 'Sign in with this password now. You can request a real "Forgot password?" reset once Supabase SMTP is configured.',
-  });
-}));
-
 app.use('/api', requireAuth);
 
 app.get('/api/settings', ah(async (_req, res) => res.json(await getSettings())));
