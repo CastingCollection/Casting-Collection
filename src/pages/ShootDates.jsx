@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../App.jsx';
+import { usePdfProgress } from '../contexts/PdfProgressContext.jsx';
 import ArtistCard from '../components/ArtistCard.jsx';
 import CallSheetView from '../components/CallSheetView.jsx';
 import SmartSearchBar from '../components/SmartSearchBar.jsx';
@@ -8,6 +9,7 @@ import BulkEditBar from '../components/BulkEditBar.jsx';
 
 export default function ShootDates() {
   const { refresh, refreshKey } = useApp();
+  const runPdfDownload = usePdfProgress();
   const [artists, setArtists] = useState([]);
   const [callSheets, setCallSheets] = useState([]);
   const [q, setQ] = useState('');
@@ -314,7 +316,7 @@ export default function ShootDates() {
                   <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
                     <button onClick={() => setPreviewCSId(cs.id)} className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200">👁 Preview</button>
                     <button onClick={() => setActiveCS(cs.id)} className="text-xs px-2 py-1 bg-gold/20 text-gold-dark rounded hover:bg-gold/30">Open</button>
-                    <button onClick={() => api.callSheetRosterPdfUrl(cs.id)} className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200">⬇ Roster PDF</button>
+                    <button onClick={() => runPdfDownload('Roster PDF', onProgress => api.callSheetRosterPdfUrl(cs.id, onProgress))} className="text-xs px-2 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200">⬇ Roster PDF</button>
                     <span>{expanded.has(`shoot-cs-${cs.id}`) ? '▾' : '▸'}</span>
                   </div>
                 </div>
@@ -410,7 +412,7 @@ export default function ShootDates() {
               <div className="flex gap-2">
                 <button onClick={() => setPreviewCSId(cs.id)} className="btn-dark text-xs">👁 Preview</button>
                 <button onClick={() => setActiveCS(cs.id)} className="btn-gold text-xs">Open</button>
-                <button onClick={() => api.callSheetPdfUrl(cs.id)} className="btn-dark text-xs">⬇ PDF</button>
+                <button onClick={() => runPdfDownload('Call Sheet PDF', onProgress => api.callSheetPdfUrl(cs.id, undefined, onProgress))} className="btn-dark text-xs">⬇ PDF</button>
                 <button onClick={() => api.callSheetExcelUrl(cs.id)} className="btn-dark text-xs">⬇ Excel</button>
                 <button onClick={async () => { if (confirm('Delete this call sheet?')) { await api.deleteCallSheet(cs.id); load(); refresh(); } }} className="btn-danger text-xs">Delete</button>
               </div>
@@ -426,7 +428,7 @@ export default function ShootDates() {
             <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200">
               <h3 className="font-bold text-charcoal">Call Sheet Preview</h3>
               <div className="flex gap-2">
-                <button onClick={() => api.callSheetPdfUrl(previewCSId)} className="btn-dark text-xs">⬇ Download PDF</button>
+                <button onClick={() => runPdfDownload('Call Sheet PDF', onProgress => api.callSheetPdfUrl(previewCSId, undefined, onProgress))} className="btn-dark text-xs">⬇ Download PDF</button>
                 <button onClick={() => setPreviewCSId(null)} className="btn-ghost text-xs">✕ Close</button>
               </div>
             </div>

@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
-import { api } from '../api.js';
+import { api, pollPdfJob, downloadPdfJobResult } from '../api.js';
+import { usePdfProgress } from '../contexts/PdfProgressContext.jsx';
+import { supabase } from '../supabaseClient.js';
 
 // Helper: file → { preview, dataUrl }
 const readFile = (file) => new Promise(resolve => {
@@ -10,6 +12,7 @@ const readFile = (file) => new Promise(resolve => {
 });
 
 export default function CastingPresentation() {
+  const runPdfDownload = usePdfProgress();
   const [coverImage, setCoverImage] = useState(null);
   // sets: [{ id, headerImage, groups: [{ id, name, images: [{id, preview, dataUrl}] }] }]
   const [sets, setSets] = useState([]);
@@ -190,19 +193,29 @@ export default function CastingPresentation() {
         }))),
       })));
 
-      const res = await fetch('/api/presentation/pdf', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ coverSrc, sets: setsPayload }),
+      // /api/presentation/pdf now starts a background job and responds with
+      // {jobId} immediately (see server.js's "PDF generation jobs"), instead
+      // of returning the finished PDF directly — so the shared progress
+      // modal can show real generation progress instead of just "Generating…"
+      // with no further detail.
+      await runPdfDownload('Presentation PDF', async (onProgress) => {
+        const { data } = await supabase.auth.getSession();
+        const token = data.session?.access_token;
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const startRes = await fetch('/api/presentation/pdf', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ coverSrc, sets: setsPayload }),
+        });
+        if (!startRes.ok) {
+          const err = await startRes.json().catch(() => ({ error: 'PDF generation failed' }));
+          throw new Error(err.error || 'PDF generation failed');
+        }
+        const { jobId } = await startRes.json();
+        await pollPdfJob(jobId, onProgress);
+        await downloadPdfJobResult(jobId, 'casting-presentation.pdf');
       });
-      if (!res.ok) throw new Error('PDF generation failed');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'casting-presentation.pdf';
-      a.click();
-      URL.revokeObjectURL(url);
     } catch (err) {
       alert('PDF download failed: ' + err.message);
     } finally {

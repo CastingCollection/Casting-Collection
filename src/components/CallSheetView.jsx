@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../App.jsx';
+import { usePdfProgress } from '../contexts/PdfProgressContext.jsx';
 
 export default function CallSheetView({ sheetId, onClose }) {
   const { refresh } = useApp();
+  const runPdfDownload = usePdfProgress();
   const [sheet, setSheet] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editingHeader, setEditingHeader] = useState(false);
@@ -491,7 +493,7 @@ export default function CallSheetView({ sheetId, onClose }) {
                 )}
               </div>
               <button onClick={()=>setEditingHeader(true)} className="btn-ghost text-xs">Edit Header</button>
-              <button onClick={() => api.callSheetPdfUrl(sheetId, notesSort)} className="btn-dark text-xs">⬇ PDF</button>
+              <button onClick={() => runPdfDownload('Call Sheet PDF', onProgress => api.callSheetPdfUrl(sheetId, notesSort, onProgress))} className="btn-dark text-xs">⬇ PDF</button>
               <button onClick={() => api.callSheetExcelUrl(sheetId)} className="btn-dark text-xs">⬇ Excel</button>
             </div>
           </div>
