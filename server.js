@@ -1974,22 +1974,18 @@ app.get('/api/call-sheets/:id/roster/pdf', ah(async (req, res) => {
 
   // Scale the grid to the size of the WHOLE roster (not per-banner), so a
   // massive shoot day (100s of artists) gets more, smaller columns per page,
-  // while a small call sheet gets fewer, larger ones. Font/padding sizes
-  // scale down slightly alongside more columns so text doesn't look
-  // oversized relative to a shrunken card.
+  // while a small call sheet gets fewer, larger ones. Column counts were
+  // calibrated by actually measuring rendered column width at landscape A4
+  // size (see test_measure2.mjs) rather than guessed, since landscape gives
+  // ~40% more usable width than the original portrait 4-column layout —
+  // reusing the same column counts as portrait would make every tier bigger
+  // than before, not smaller. Font sizes scale down slightly alongside more
+  // columns so text doesn't look oversized relative to a shrunken card.
   const totalArtists = allArtists.length;
-  const cols = totalArtists > 150 ? 6 : totalArtists > 60 ? 5 : totalArtists > 20 ? 4 : 3;
-  const scale = cols <= 4 ? 1 : cols === 5 ? 0.92 : 0.85;
+  const cols = totalArtists > 150 ? 7 : totalArtists > 60 ? 6 : totalArtists > 20 ? 5 : 4;
+  const scale = cols <= 4 ? 1.15 : cols === 5 ? 1.05 : cols === 6 ? 1 : 0.9;
   const fs = n => Math.round(n * scale * 10) / 10;
   const px = n => Math.max(2, Math.round(n * scale));
-  // Photo height is a FIXED mm value (not a percentage of column width). The
-  // previous padding-bottom:133% approach tied photo height to column width,
-  // which looked fine in portrait with 4 narrow columns, but in landscape
-  // (wider columns) it made every photo much taller, so only one row fit per
-  // page — that's what caused most groups to end up alone on their own page
-  // in a quick local test render. A fixed height keeps rows compact and
-  // predictable regardless of orientation or column count.
-  const photoH = Math.round(42 * scale);
 
   const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>
@@ -2011,8 +2007,16 @@ body{font-family:Arial,sans-serif;font-size:10px;background:#fff;padding:6px 14p
 .banner-count{background:#d4a843;color:#000;font-size:${fs(9)}px;font-weight:900;padding:1px 7px;border-radius:20px}
 .grid{display:grid;grid-template-columns:repeat(${cols},1fr);gap:${px(6)}px}
 .artist-card{border:1px solid #ccc;border-radius:4px;overflow:hidden;break-inside:avoid;page-break-inside:avoid}
-.photo-wrap{width:100%;position:relative;height:${photoH}mm;overflow:hidden;background:#f0f0f0}
-.photo{display:block;width:100%;height:100%;object-fit:cover}
+/* padding-bottom:133% (not a fixed height) is deliberate: it ties photo box
+   height to the ACTUAL rendered column width, so the box always keeps a
+   portrait headshot's proportions no matter how wide a column ends up being.
+   A previous attempt used a fixed mm height here to fix a landscape-mode row
+   count issue, but that decoupled height from width entirely — at 6
+   columns the box came out wider than tall, so object-fit:cover zoomed in
+   and cropped photos strangely. Row-count-per-page is instead controlled by
+   picking columns wide enough that height stays reasonable (see cols above). */
+.photo-wrap{width:100%;position:relative;padding-bottom:133%;overflow:hidden;background:#f0f0f0}
+.photo{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover}
 .photo-placeholder{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:900;color:#aaa;background:#e8e8e8}
 .artist-info{padding:${px(5)}px ${px(6)}px}
 .artist-name{font-size:${fs(9)}px;font-weight:900;text-transform:uppercase;letter-spacing:.5px}
