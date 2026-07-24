@@ -1972,6 +1972,25 @@ app.get('/api/call-sheets/:id/roster/pdf', ah(async (req, res) => {
       <div class="grid">${g.artists.map(makeCard).join('')}</div>
     </div>`).join('');
 
+  // Scale the grid to the size of the WHOLE roster (not per-banner), so a
+  // massive shoot day (100s of artists) gets more, smaller columns per page,
+  // while a small call sheet gets fewer, larger ones. Font/padding sizes
+  // scale down slightly alongside more columns so text doesn't look
+  // oversized relative to a shrunken card.
+  const totalArtists = allArtists.length;
+  const cols = totalArtists > 150 ? 6 : totalArtists > 60 ? 5 : totalArtists > 20 ? 4 : 3;
+  const scale = cols <= 4 ? 1 : cols === 5 ? 0.92 : 0.85;
+  const fs = n => Math.round(n * scale * 10) / 10;
+  const px = n => Math.max(2, Math.round(n * scale));
+  // Photo height is a FIXED mm value (not a percentage of column width). The
+  // previous padding-bottom:133% approach tied photo height to column width,
+  // which looked fine in portrait with 4 narrow columns, but in landscape
+  // (wider columns) it made every photo much taller, so only one row fit per
+  // page — that's what caused most groups to end up alone on their own page
+  // in a quick local test render. A fixed height keeps rows compact and
+  // predictable regardless of orientation or column count.
+  const photoH = Math.round(42 * scale);
+
   const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1983,18 +2002,23 @@ body{font-family:Arial,sans-serif;font-size:10px;background:#fff;padding:6px 14p
 .cs-sub{font-size:9px;letter-spacing:2px;margin-top:2px;color:#555;text-transform:uppercase}
 .hdr-meta{font-size:9px;font-weight:700;text-align:right;line-height:1.8}
 .banner-section{margin-bottom:14px}
-.banner-hdr{background:#1a1a2e;color:#fff;font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:3px;padding:5px 10px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between}
-.banner-count{background:#d4a843;color:#000;font-size:9px;font-weight:900;padding:1px 7px;border-radius:20px}
-.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+/* break-after:avoid (+ legacy page-break-after) keeps this header attached
+   to the grid that follows it: if the header + at least the first row of
+   artists don't fit in the remaining space on the current page, Chromium
+   pushes the WHOLE pair to the next page together, instead of stranding the
+   header alone at the bottom of one page with all its artists on the next. */
+.banner-hdr{background:#1a1a2e;color:#fff;font-size:${fs(11)}px;font-weight:900;text-transform:uppercase;letter-spacing:3px;padding:${px(5)}px ${px(10)}px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;break-after:avoid;page-break-after:avoid;break-inside:avoid;page-break-inside:avoid}
+.banner-count{background:#d4a843;color:#000;font-size:${fs(9)}px;font-weight:900;padding:1px 7px;border-radius:20px}
+.grid{display:grid;grid-template-columns:repeat(${cols},1fr);gap:${px(6)}px}
 .artist-card{border:1px solid #ccc;border-radius:4px;overflow:hidden;break-inside:avoid;page-break-inside:avoid}
-.photo-wrap{width:100%;position:relative;padding-bottom:133%;overflow:hidden;background:#f0f0f0}
-.photo{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover}
+.photo-wrap{width:100%;position:relative;height:${photoH}mm;overflow:hidden;background:#f0f0f0}
+.photo{display:block;width:100%;height:100%;object-fit:cover}
 .photo-placeholder{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:900;color:#aaa;background:#e8e8e8}
-.artist-info{padding:5px 6px}
-.artist-name{font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.5px}
-.artist-role{font-size:8px;font-weight:700;color:#8B1A1A;text-transform:uppercase;margin-top:2px}
-.artist-detail{font-size:8px;color:#555;margin-top:1px}
-.artist-dates{font-size:7.5px;color:#2E6DA4;margin-top:2px;line-height:1.4}
+.artist-info{padding:${px(5)}px ${px(6)}px}
+.artist-name{font-size:${fs(9)}px;font-weight:900;text-transform:uppercase;letter-spacing:.5px}
+.artist-role{font-size:${fs(8)}px;font-weight:700;color:#8B1A1A;text-transform:uppercase;margin-top:2px}
+.artist-detail{font-size:${fs(8)}px;color:#555;margin-top:1px}
+.artist-dates{font-size:${fs(7.5)}px;color:#2E6DA4;margin-top:2px;line-height:1.4}
 .footer{text-align:center;font-size:8px;border-top:1px solid #ccc;margin-top:14px;padding-top:6px;color:#666}
 </style></head><body>
 <div class="hdr">
@@ -2025,7 +2049,7 @@ ${sectionsHTML}
     // a second per image rather than needing a long per-image budget.
     await waitForImages(page, 5000);
     console.log(`[roster pdf] waitForImages: ${Date.now() - t}ms`); t = Date.now();
-    const buf = await page.pdf({ format: 'A4', printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
+    const buf = await page.pdf({ format: 'A4', landscape: true, printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
     console.log(`[roster pdf] page.pdf: ${Date.now() - t}ms`);
     return buf;
   }, 120000); // larger rosters (100s of artist photos) can genuinely take longer to rasterize than a single call sheet
