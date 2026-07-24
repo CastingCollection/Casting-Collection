@@ -26,6 +26,8 @@ import CalendarPage from './pages/CalendarPage.jsx';
 import AllArtists from './pages/AllArtists.jsx';
 import ZCards from './pages/ZCards.jsx';
 import { api } from './api.js';
+import { PdfProgressProvider } from './contexts/PdfProgressContext.jsx';
+import PdfProgressModal from './components/PdfProgressModal.jsx';
 
 export const AppContext = createContext(null);
 
@@ -61,14 +63,17 @@ export default function App() {
 
   return (
     <AppContext.Provider value={{ counts, settings, setSettings, refresh, refreshKey }}>
-      <div className="flex h-screen overflow-hidden bg-sidebar">
-        <Sidebar activePage={page} onNavigate={setPage} counts={counts} settings={settings} />
-        <main className="flex-1 overflow-y-auto bg-content-bg">
-          <ErrorBoundary key={page}>
-            {pages[page] || <div className="p-8 text-gray-500">Page not found</div>}
-          </ErrorBoundary>
-        </main>
-      </div>
+      <PdfProgressProvider>
+        <div className="flex h-screen overflow-hidden bg-sidebar">
+          <Sidebar activePage={page} onNavigate={setPage} counts={counts} settings={settings} />
+          <main className="flex-1 overflow-y-auto bg-content-bg">
+            <ErrorBoundary key={page}>
+              {pages[page] || <div className="p-8 text-gray-500">Page not found</div>}
+            </ErrorBoundary>
+          </main>
+        </div>
+        <PdfProgressModal />
+      </PdfProgressProvider>
     </AppContext.Provider>
   );
 }

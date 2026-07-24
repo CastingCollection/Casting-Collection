@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../App.jsx';
+import { usePdfProgress } from '../contexts/PdfProgressContext.jsx';
 
 const FIELDS = [
   { key: 'age',        label: 'Age' },
@@ -101,6 +102,7 @@ function ZCardPreview({ zcard, settings, name }) {
 
 export default function ZCards() {
   const { settings, refreshKey } = useApp();
+  const runPdfDownload = usePdfProgress();
   const [zcards, setZcards] = useState([]);
   const [artists, setArtists] = useState([]);
   const [editing, setEditing] = useState(null); // null=list | 'new' | zcard obj
@@ -163,7 +165,7 @@ export default function ZCards() {
   };
 
   const handleDownload = async (id) => {
-    await api.zCardPdfUrl(id);
+    await runPdfDownload('Z-Card PDF', onProgress => api.zCardPdfUrl(id, onProgress));
   };
 
   const selectArtist = (artist) => {

@@ -7,6 +7,7 @@ import { createPool } from 'generic-pool';
 import ExcelJS from 'exceljs';
 import multer from 'multer';
 import sharp from 'sharp';
+import { randomUUID } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -149,16 +150,23 @@ async function fetchAsDataUri(url) {
 // (not e.g. 32+): each in-flight worker briefly holds a full-resolution image
 // buffer in memory before sharp shrinks it, so a very high number here would
 // reintroduce the same kind of memory spike this function exists to avoid.
-async function inlineImages(urls, concurrency = 8) {
+//
+// onProgress(done, total) is optional — called after each image finishes (success
+// or fallback) so a caller tracking a PDF generation job can report real
+// percent-complete for this phase instead of a bare spinner.
+async function inlineImages(urls, concurrency = 8, onProgress) {
   const unique = [...new Set(urls.filter(Boolean))];
   const map = new Map();
-  let i = 0;
+  let i = 0, done = 0;
   async function worker() {
     while (i < unique.length) {
       const url = unique[i++];
-      if (url.startsWith('data:')) { map.set(url, url); continue; }
-      const dataUri = await fetchAsDataUri(url);
-      map.set(url, dataUri || url);
+      if (url.startsWith('data:')) { map.set(url, url); } else {
+        const dataUri = await fetchAsDataUri(url);
+        map.set(url, dataUri || url);
+      }
+      done++;
+      onProgress?.(done, unique.length);
     }
   }
   await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, unique.length)) }, worker));
@@ -245,6 +253,37 @@ async function waitForImages(page, perImageTimeoutMs = 20000) {
     }));
   }, perImageTimeoutMs);
 }
+
+// ── PDF generation jobs ────────────────────────────────────────────────────────
+// PDF generation (especially a large roster) can take anywhere from a couple
+// seconds to over a minute, and there was previously no way for the frontend
+// to show real progress — a click just did nothing visible until the
+// download appeared or an error alert popped up. Instead of returning the
+// finished PDF directly from the route handler, these routes now: (1) do the
+// minimal upfront DB fetch needed to name the file, (2) create a job entry
+// and respond immediately with its id, then (3) keep generating in the
+// background, updating the job's stage/percent as it goes. The frontend polls
+// GET /api/jobs/:id/status for {stage, percent} and, once status is 'done',
+// fetches GET /api/jobs/:id/download for the actual file.
+//
+// This is an in-memory Map, not a persistent queue — fine for a single Render
+// instance (no horizontal scaling here) and jobs are short-lived (seconds to
+// low minutes). The sweep below guards against a client that starts a job and
+// never polls/downloads it (closed tab, network drop) leaking memory forever.
+const pdfJobs = new Map(); // jobId -> { status, stage, percent, buffer, filename, error, createdAt }
+function createPdfJob(filename) {
+  const id = randomUUID();
+  pdfJobs.set(id, { status: 'running', stage: 'Starting…', percent: 0, buffer: null, filename, error: null, createdAt: Date.now() });
+  return id;
+}
+function updatePdfJob(id, patch) {
+  const job = pdfJobs.get(id);
+  if (job) Object.assign(job, patch);
+}
+setInterval(() => {
+  const cutoff = Date.now() - 10 * 60 * 1000; // 10 minutes is generous for even a slow roster + a distracted user
+  for (const [id, job] of pdfJobs) if (job.createdAt < cutoff) pdfJobs.delete(id);
+}, 5 * 60 * 1000);
 
 // ── Request helpers ───────────────────────────────────────────────────────────
 // supabase-js never throws on query errors — it resolves { data, error } — so
@@ -353,6 +392,28 @@ async function requireAuth(req, res, next) {
   }
 }
 app.use('/api', requireAuth);
+
+// Polled by the frontend while a PDF generation job (see "PDF generation
+// jobs" above) is in flight, to drive a real progress bar.
+app.get('/api/jobs/:id/status', ah(async (req, res) => {
+  const job = pdfJobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json({ status: job.status, stage: job.stage, percent: job.percent, error: job.error });
+}));
+
+// Fetched once a job's status is 'done'. 425 ("Too Early") if the caller
+// races ahead of the job finishing — the frontend only calls this after
+// seeing status:'done', but a stale/duplicate poll shouldn't 404 confusingly.
+app.get('/api/jobs/:id/download', ah(async (req, res) => {
+  const job = pdfJobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.status === 'error') return res.status(500).json({ error: job.error || 'PDF generation failed' });
+  if (job.status !== 'done') return res.status(425).json({ error: 'Not ready yet' });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${job.filename}"`);
+  res.send(job.buffer);
+  pdfJobs.delete(req.params.id); // delivered — free the buffer rather than waiting for the sweep
+}));
 
 app.get('/api/settings', ah(async (_req, res) => res.json(await getSettings())));
 
@@ -1726,7 +1787,12 @@ app.get('/api/call-sheets/:id/preview', ah(async (req, res) => {
   res.send(buildCallSheetHTML(enriched, sheet.type, S));
 }));
 
-// Roster PDF for a full shoot date — all banners + artists in one document
+// Roster PDF for a full shoot date — all banners + artists in one document.
+// This is the slowest export (100s of photos), so it's the main motivation
+// for the job/progress-polling pattern (see "PDF generation jobs" above): the
+// initial GET only does enough DB work to name the file and know the total
+// artist count, then responds with a jobId immediately, and the rest — photo
+// fetching, HTML build, Chromium render — runs in the background afterward.
 app.get('/api/call-sheets/:id/roster/pdf', ah(async (req, res) => {
   const { data: sheet, error } = await supabase.from('call_sheets').select('*').eq('id', req.params.id).maybeSingle();
   if (checkErr(res, error)) return;
@@ -1742,15 +1808,27 @@ app.get('/api/call-sheets/:id/roster/pdf', ah(async (req, res) => {
     .map(row => ({ banner_id: row.banner_id, ...(row.artists || {}) }))
     .sort((a, b) => (a.first_name || '').localeCompare(b.first_name || ''));
 
+  const filename = `roster-${(sheet.title||'sheet').replace(/[^a-z0-9]/gi,'-')}.pdf`.toLowerCase();
+  const jobId = createPdfJob(filename);
+  res.json({ jobId });
+
+  (async () => {
   const S = await getSettings();
   const logoUrl = resolveImageUrl(sheet.logo_path || S.app_logo_path);
 
   // Prefetch every artist photo (+ logo) server-side and embed as data: URIs
   // instead of leaving Chromium to fetch ~195 <img src> URLs itself over the
   // network — see fetchAsDataUri/inlineImages above for why this is the real
-  // fix for roster slowness, not just a bigger timeout.
+  // fix for roster slowness, not just a bigger timeout. This phase is mapped
+  // to 5-70% of the job's overall progress since it's normally by far the
+  // slowest part of a big roster.
   const t0 = Date.now();
-  const imageMap = await inlineImages([logoUrl, ...allArtists.map(a => resolveImageUrl(a.headshot_path))]);
+  updatePdfJob(jobId, { stage: `Fetching ${allArtists.length} photos…`, percent: 5 });
+  const imageMap = await inlineImages(
+    [logoUrl, ...allArtists.map(a => resolveImageUrl(a.headshot_path))],
+    8,
+    (done, total) => updatePdfJob(jobId, { stage: `Fetching photos… (${done}/${total})`, percent: 5 + Math.round((done / total) * 65) }),
+  );
   console.log(`[roster pdf] inlineImages: ${Date.now() - t0}ms (${imageMap.size} unique images)`);
   const inlinedLogoUrl = logoUrl ? (imageMap.get(logoUrl) || logoUrl) : null;
 
@@ -1870,50 +1948,63 @@ ${sectionsHTML}
 <div class="footer">${esc(S.app_production||'')} · ${esc(sheet.title||'')} · ${allArtists.length} artists</div>
 </body></html>`;
 
-  const filename = `roster-${(sheet.title||'sheet').replace(/[^a-z0-9]/gi,'-')}.pdf`.toLowerCase();
   console.log(`[roster pdf] sheet=${sheet.id} artists=${allArtists.length} html_bytes=${html.length}`);
+  updatePdfJob(jobId, { stage: 'Rendering PDF…', percent: 72 });
   const pdf = await withPage(async page => {
     let t = Date.now();
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
     console.log(`[roster pdf] setContent: ${Date.now() - t}ms`); t = Date.now();
+    updatePdfJob(jobId, { percent: 82 });
     // Photos are already embedded as data: URIs at this point (see
     // inlineImages() above), so this just waits for Chromium to decode/paint
     // them locally — no network involved, so it should resolve in well under
     // a second per image rather than needing a long per-image budget.
     await waitForImages(page, 5000);
     console.log(`[roster pdf] waitForImages: ${Date.now() - t}ms`); t = Date.now();
+    updatePdfJob(jobId, { percent: 88 });
     const buf = await page.pdf({ format: 'A4', landscape: true, printBackground: true, margin: { top:'10mm', bottom:'10mm', left:'10mm', right:'10mm' } });
     console.log(`[roster pdf] page.pdf: ${Date.now() - t}ms`);
     return buf;
   }, 120000); // larger rosters (100s of artist photos) can genuinely take longer to rasterize than a single call sheet
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(Buffer.from(pdf));
+  updatePdfJob(jobId, { status: 'done', percent: 100, stage: 'Done', buffer: Buffer.from(pdf) });
+  })().catch(err => {
+    console.error('[roster pdf job]', err);
+    updatePdfJob(jobId, { status: 'error', error: err.message });
+  });
 }));
 
 app.get('/api/call-sheets/:id/pdf', ah(async (req, res) => {
   const { data: sheet, error } = await supabase.from('call_sheets').select('*').eq('id', req.params.id).maybeSingle();
   if (checkErr(res, error)) return;
   if (!sheet) return res.status(404).json({ error: 'Not found' });
-  const enriched = await enrichSheet(sheet);
-  const notesSort = req.query.notesSort;
-  if (notesSort === 'asc' || notesSort === 'desc') {
-    enriched.artists.sort((a, b) => {
-      const na = (a.notes||'').toLowerCase(), nb = (b.notes||'').toLowerCase();
-      return notesSort === 'asc' ? na.localeCompare(nb) : nb.localeCompare(na);
-    });
-  }
-  const S = await getSettings();
   const filename = `call-sheet-${(sheet.title||sheet.id).replace(/[^a-z0-9]/gi,'-').toLowerCase()}.pdf`;
-  const pdf = await withPage(async page => {
-    await page.setContent(buildCallSheetHTML(enriched, sheet.type, S), { waitUntil: 'domcontentloaded' });
-    await waitForImages(page);
-    return page.pdf({ format: 'A4', landscape: true, printBackground: true,
-      margin: { top:'8mm', bottom:'8mm', left:'8mm', right:'8mm' } });
+  const jobId = createPdfJob(filename);
+  res.json({ jobId });
+
+  (async () => {
+    const enriched = await enrichSheet(sheet);
+    const notesSort = req.query.notesSort;
+    if (notesSort === 'asc' || notesSort === 'desc') {
+      enriched.artists.sort((a, b) => {
+        const na = (a.notes||'').toLowerCase(), nb = (b.notes||'').toLowerCase();
+        return notesSort === 'asc' ? na.localeCompare(nb) : nb.localeCompare(na);
+      });
+    }
+    const S = await getSettings();
+    updatePdfJob(jobId, { stage: 'Rendering PDF…', percent: 30 });
+    const pdf = await withPage(async page => {
+      await page.setContent(buildCallSheetHTML(enriched, sheet.type, S), { waitUntil: 'domcontentloaded' });
+      updatePdfJob(jobId, { percent: 60 });
+      await waitForImages(page);
+      updatePdfJob(jobId, { percent: 85 });
+      return page.pdf({ format: 'A4', landscape: true, printBackground: true,
+        margin: { top:'8mm', bottom:'8mm', left:'8mm', right:'8mm' } });
+    });
+    updatePdfJob(jobId, { status: 'done', percent: 100, stage: 'Done', buffer: Buffer.from(pdf) });
+  })().catch(err => {
+    console.error('[call sheet pdf job]', err);
+    updatePdfJob(jobId, { status: 'error', error: err.message });
   });
-  res.setHeader('Content-Type','application/pdf');
-  res.setHeader('Content-Disposition',`attachment; filename="${filename}"`);
-  res.send(Buffer.from(pdf));
 }));
 
 app.get('/api/call-sheets/:id/excel', ah(async (req, res) => {
@@ -1947,6 +2038,10 @@ app.get('/api/briefs/:id/pdf', ah(async (req, res) => {
   const { data: brief, error } = await supabase.from('briefs').select('*').eq('id', req.params.id).maybeSingle();
   if (checkErr(res, error)) return;
   if (!brief) return res.status(404).json({ error: 'Not found' });
+  const jobId = createPdfJob(`casting-brief-${brief.id}.pdf`);
+  res.json({ jobId });
+
+  (async () => {
   let moodImages = [];
   try { moodImages = JSON.parse(brief.mood_board_images || '[]'); } catch {}
   let restrictions = {};
@@ -2055,15 +2150,20 @@ ${moodHtml ? (() => {
 
 </body></html>`;
 
+  updatePdfJob(jobId, { stage: 'Rendering PDF…', percent: 40 });
   const pdf = await withPage(async page => {
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    updatePdfJob(jobId, { percent: 60 });
     await waitForImages(page);
+    updatePdfJob(jobId, { percent: 85 });
     return page.pdf({ format: 'A4', printBackground: true,
       margin: { top:'15mm', bottom:'15mm', left:'15mm', right:'15mm' } });
   });
-  res.setHeader('Content-Type','application/pdf');
-  res.setHeader('Content-Disposition',`attachment; filename="casting-brief-${brief.id}.pdf"`);
-  res.send(Buffer.from(pdf));
+  updatePdfJob(jobId, { status: 'done', percent: 100, stage: 'Done', buffer: Buffer.from(pdf) });
+  })().catch(err => {
+    console.error('[brief pdf job]', err);
+    updatePdfJob(jobId, { status: 'error', error: err.message });
+  });
 }));
 
 // ── Z-Cards ───────────────────────────────────────────────────────────────────
@@ -2137,14 +2237,16 @@ app.post('/api/zcards/:id/photo/:slot', upload.single('photo'), ah(async (req, r
 }));
 
 app.get('/api/zcards/:id/pdf', ah(async (req, res) => {
-  try {
-    const { data: z, error } = await supabase.from('zcards')
-      .select('*, artists(first_name,last_name,headshot_path)')
-      .eq('id', req.params.id).maybeSingle();
-    if (checkErr(res, error)) return;
-    if (!z) return res.status(404).json({ error: 'Not found' });
-    const flat = flattenZcard(z);
+  const { data: z, error } = await supabase.from('zcards')
+    .select('*, artists(first_name,last_name,headshot_path)')
+    .eq('id', req.params.id).maybeSingle();
+  if (checkErr(res, error)) return;
+  if (!z) return res.status(404).json({ error: 'Not found' });
+  const flat = flattenZcard(z);
+  const jobId = createPdfJob(`zcard-${flat.id}.pdf`);
+  res.json({ jobId });
 
+  (async () => {
     const S = await getSettings();
     const logoUrl = resolveImageUrl(S.app_logo_path);
 
@@ -2210,18 +2312,19 @@ body{font-family:Arial,sans-serif;background:#0d0d0d;width:297mm;height:210mm;ov
 </div>
 </body></html>`;
 
+    updatePdfJob(jobId, { stage: 'Rendering PDF…', percent: 40 });
     const pdf = await withPage(async page => {
       await page.setContent(html, { waitUntil: 'domcontentloaded' });
+      updatePdfJob(jobId, { percent: 60 });
       await waitForImages(page);
+      updatePdfJob(jobId, { percent: 85 });
       return page.pdf({ format: 'A4', landscape: true, printBackground: true, margin: { top:0, bottom:0, left:0, right:0 } });
     });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="zcard-${flat.id}.pdf"`);
-    res.send(Buffer.from(pdf));
-  } catch (e) {
-    console.error('[zcard pdf]', e);
-    res.status(500).json({ error: e.message });
-  }
+    updatePdfJob(jobId, { status: 'done', percent: 100, stage: 'Done', buffer: Buffer.from(pdf) });
+  })().catch(e => {
+    console.error('[zcard pdf job]', e);
+    updatePdfJob(jobId, { status: 'error', error: e.message });
+  });
 }));
 
 // ── Casting Presentation CRUD ─────────────────────────────────────────────────
@@ -2285,6 +2388,10 @@ app.post('/api/presentations/upload-image', ah(async (req, res) => {
 // (raw data: URIs) are still supported by embedding them directly.
 app.post('/api/presentation/pdf', ah(async (req, res) => {
   const { coverSrc, sets = [] } = req.body;
+  const jobId = createPdfJob('casting-presentation.pdf');
+  res.json({ jobId });
+
+  (async () => {
   const escP = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
   const toImgSrc = (src) => {
@@ -2340,16 +2447,21 @@ body{font-family:Arial,sans-serif;background:#fff;width:${PAGE_W}px}
 </style>
 </head><body>${bodyHtml}</body></html>`;
 
+  updatePdfJob(jobId, { stage: 'Rendering PDF…', percent: 40 });
   const pdf = await withPage(async page => {
     await page.setViewport({ width: PAGE_W, height: PAGE_H });
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    updatePdfJob(jobId, { percent: 60 });
     await waitForImages(page);
+    updatePdfJob(jobId, { percent: 85 });
     return page.pdf({ format: 'A3', landscape: true, printBackground: true,
       margin: { top: '0', bottom: '0', left: '0', right: '0' } });
   });
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', 'attachment; filename="casting-presentation.pdf"');
-  res.send(Buffer.from(pdf));
+  updatePdfJob(jobId, { status: 'done', percent: 100, stage: 'Done', buffer: Buffer.from(pdf) });
+  })().catch(err => {
+    console.error('[presentation pdf job]', err);
+    updatePdfJob(jobId, { status: 'error', error: err.message });
+  });
 }));
 
 // ── SPA fallback (serve dist in prod) ────────────────────────────────────────

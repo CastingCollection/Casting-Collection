@@ -97,6 +97,82 @@ async function fetchBlobUrl(url) {
   return URL.createObjectURL(blob);
 }
 
+// ── PDF generation job polling ────────────────────────────────────────────────
+// PDF generation can take anywhere from a couple seconds (a small brief) to
+// over a minute (a roster with 100s of photos), and there was previously no
+// way to show real progress — clicking the button did nothing visible until
+// the download appeared or an error alert popped up. The relevant /api/*/pdf
+// routes now respond with { jobId } immediately instead of the PDF itself
+// (see server.js's "PDF generation jobs"), so the frontend polls for status
+// and can drive an actual progress bar instead of a bare spinner.
+
+async function authHeaders() {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// Polls a PDF job's status every 700ms, calling onProgress(job) with the
+// latest {status, stage, percent} after every poll. Resolves once the job is
+// done; throws (with the server's error message) if it failed.
+export async function pollPdfJob(jobId, onProgress) {
+  const headers = await authHeaders();
+  while (true) {
+    await new Promise(r => setTimeout(r, 700));
+    const res = await fetch(`/api/jobs/${jobId}/status`, { headers });
+    if (!res.ok) throw new Error('Lost track of the PDF job — please try again');
+    const job = await res.json();
+    onProgress?.(job);
+    if (job.status === 'error') throw new Error(job.error || 'PDF generation failed');
+    if (job.status === 'done') return;
+  }
+}
+
+// Downloads a finished PDF job's file and triggers a client-side save, the
+// same way the old direct-download flow did.
+export async function downloadPdfJobResult(jobId, filename) {
+  const headers = await authHeaders();
+  const res = await fetch(`/api/jobs/${jobId}/download`, { headers });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Download failed');
+  }
+  const blob = await res.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = filename || '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+}
+
+// Starts a job-backed PDF export (GET by default, or POST with a JSON body
+// for routes like /api/presentation/pdf), polls it to completion while
+// reporting progress via onProgress, then downloads the finished file.
+async function downloadFileWithProgress(startUrl, filename, onProgress, opts = {}) {
+  try {
+    const headers = { ...(await authHeaders()), ...(opts.body ? { 'Content-Type': 'application/json' } : {}) };
+    const startRes = await fetch(startUrl, {
+      method: opts.method || 'GET',
+      headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    if (!startRes.ok) {
+      const err = await startRes.json().catch(() => ({ error: startRes.statusText }));
+      throw new Error(err.error || 'Failed to start PDF generation');
+    }
+    const { jobId } = await startRes.json();
+    await pollPdfJob(jobId, onProgress);
+    await downloadPdfJobResult(jobId, filename);
+  } catch (err) {
+    console.error('[download failed]', startUrl, err);
+    alert(`Download failed: ${err.message || err}`);
+    throw err;
+  }
+}
+
 export const api = {
   // Settings
   getSettings: () => req('GET', '/settings'),
@@ -162,8 +238,8 @@ export const api = {
   deleteCallSheet: (id) => req('DELETE', `/call-sheets/${id}`),
   promoteToFitting: (id) => req('POST', `/call-sheets/${id}/promote-to-fitting`),
   promoteToShoot: (id) => req('POST', `/call-sheets/${id}/promote-to-shoot`),
-  callSheetPdfUrl: (id, notesSort) => downloadFile(`/api/call-sheets/${id}/pdf${notesSort ? `?notesSort=${notesSort}` : ''}`, `call-sheet-${id}.pdf`),
-  callSheetRosterPdfUrl: (id) => downloadFile(`/api/call-sheets/${id}/roster/pdf`, `call-sheet-${id}-roster.pdf`),
+  callSheetPdfUrl: (id, notesSort, onProgress) => downloadFileWithProgress(`/api/call-sheets/${id}/pdf${notesSort ? `?notesSort=${notesSort}` : ''}`, `call-sheet-${id}.pdf`, onProgress),
+  callSheetRosterPdfUrl: (id, onProgress) => downloadFileWithProgress(`/api/call-sheets/${id}/roster/pdf`, `call-sheet-${id}-roster.pdf`, onProgress),
   callSheetExcelUrl: (id) => downloadFile(`/api/call-sheets/${id}/excel`, `call-sheet-${id}.xlsx`),
   // Returns an object URL for the call sheet preview HTML so it can be set
   // as an <iframe src> — the iframe itself can't send the Authorization
@@ -201,7 +277,7 @@ export const api = {
   updateBrief: (id, d) => req('PUT', `/briefs/${id}`, d),
   deleteBrief: (id) => req('DELETE', `/briefs/${id}`),
   uploadMoodboard: (id, fd) => req('POST', `/briefs/${id}/moodboard`, fd),
-  briefPdfUrl: (id) => downloadFile(`/api/briefs/${id}/pdf`, `casting-brief-${id}.pdf`),
+  briefPdfUrl: (id, onProgress) => downloadFileWithProgress(`/api/briefs/${id}/pdf`, `casting-brief-${id}.pdf`, onProgress),
 
   // Roles to Fit
   getRolesToFit: () => req('GET', '/roles-to-fit'),
@@ -219,5 +295,5 @@ export const api = {
   updateZCard: (id, d) => req('PUT', `/zcards/${id}`, d),
   deleteZCard: (id) => req('DELETE', `/zcards/${id}`),
   uploadZCardPhoto: (id, slot, fd) => req('POST', `/zcards/${id}/photo/${slot}`, fd),
-  zCardPdfUrl: (id) => downloadFile(`/api/zcards/${id}/pdf`, `zcard-${id}.pdf`),
+  zCardPdfUrl: (id, onProgress) => downloadFileWithProgress(`/api/zcards/${id}/pdf`, `zcard-${id}.pdf`, onProgress),
 };

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api.js';
 import { useApp } from '../App.jsx';
+import { usePdfProgress } from '../contexts/PdfProgressContext.jsx';
 
 const RATES = Array.from({ length: (5000 - 200) / 50 + 1 }, (_, i) => `R ${200 + i * 50}`);
 const normalizeRate = (v) => { const n = v.replace(/[Rr]/gi, '').replace(/\s+/g, '').trim(); return n ? `R ${n}` : ''; };
@@ -30,6 +31,7 @@ const RESTRICTION_ITEMS = [
 
 export default function CastingBriefs() {
   const { refreshKey } = useApp();
+  const runPdfDownload = usePdfProgress();
   const [briefs, setBriefs] = useState([]);
   const [productions, setProductions] = useState([]);
   const [editing, setEditing] = useState(null); // null=list, 'new', or brief object
@@ -108,7 +110,7 @@ export default function CastingBriefs() {
       }
       load();
       if (download) {
-        await api.briefPdfUrl(saved.id);
+        await runPdfDownload('Casting Brief PDF', onProgress => api.briefPdfUrl(saved.id, onProgress));
       }
       setEditing(null);
     } finally {
@@ -466,7 +468,7 @@ export default function CastingBriefs() {
               {b.scene_description && <p className="text-xs text-gray-500 line-clamp-2">{b.scene_description}</p>}
               <div className="flex gap-2 pt-1">
                 <button onClick={() => startEdit(b)} className="btn-ghost text-xs flex-1">Edit</button>
-                <button onClick={() => api.briefPdfUrl(b.id)} className="btn-dark text-xs">⬇ PDF</button>
+                <button onClick={() => runPdfDownload('Casting Brief PDF', onProgress => api.briefPdfUrl(b.id, onProgress))} className="btn-dark text-xs">⬇ PDF</button>
                 <button onClick={() => handleDelete(b.id)} className="btn-danger text-xs">Del</button>
               </div>
             </div>
