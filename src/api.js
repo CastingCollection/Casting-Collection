@@ -2,21 +2,25 @@ import { supabase } from './supabaseClient.js';
 
 const BASE = '/api';
 
-// Reads the current Supabase session's access token. Normally instant (reads
-// from memory/localStorage), but if this fires immediately after a prior
-// request — e.g. uploading a headshot right after creating the artist that
-// owns it — supabase-js can occasionally still be settling its session state
-// (seen in practice on Safari) and briefly return no session at all. One
-// short retry closes that gap instead of silently sending an unauthenticated
-// request that the backend then rejects with "Missing Authorization header".
+// Remembers the last access token that a request actually succeeded with.
+// Confirmed via real testing: two requests fired back-to-back (e.g. create
+// an artist, then immediately upload its headshot) can have the SECOND
+// supabase.auth.getSession() call come back with no session at all — even
+// after a short retry — while the first call moments earlier had one just
+// fine. Rather than keep guessing at supabase-js/Safari's internal timing,
+// just reuse the token that's already proven to work for this tab. If it's
+// genuinely stale, the server 401s and the cache is cleared (see below) so
+// the next fresh getSession() read is trusted again.
+let lastKnownToken = null;
+
 async function getAccessToken() {
   for (let attempt = 0; attempt < 2; attempt++) {
     const { data } = await supabase.auth.getSession();
     const token = data.session?.access_token;
-    if (token) return token;
+    if (token) { lastKnownToken = token; return token; }
     if (attempt === 0) await new Promise(r => setTimeout(r, 300));
   }
-  return null;
+  return lastKnownToken;
 }
 
 async function req(method, url, body) {
@@ -32,6 +36,7 @@ async function req(method, url, body) {
   };
   const res = await fetch(BASE + url, opts);
   if (!res.ok) {
+    if (res.status === 401) lastKnownToken = null;
     const err = await res.json().catch(() => ({ error: res.statusText }));
     const e = new Error(err.error || 'Request failed');
     e.status = res.status;
