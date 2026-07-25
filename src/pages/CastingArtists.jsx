@@ -112,11 +112,11 @@ export default function CastingArtists() {
   // Temporary — meant to be run once, then this button (and the server route
   // it calls) removed.
   const [backfill, setBackfill] = useState(null); // { running, stage, percent, result, error }
-  const runHeadshotBackfill = async () => {
-    if (!confirm('Resize every existing artist photo to the smaller PDF-quality size? This changes stored photos for the whole system, not just new uploads. This can take a while for a large roster — you can leave this page open while it runs.')) return;
+  const runHeadshotBackfill = async (ids) => {
+    if (!ids && !confirm('Resize every existing artist photo to the smaller PDF-quality size? This changes stored photos for the whole system, not just new uploads. This can take a while for a large roster — you can leave this page open while it runs.')) return;
     setBackfill({ running: true, stage: 'Starting…', percent: 0 });
     try {
-      const { jobId } = await api.backfillHeadshotSizes();
+      const { jobId } = await api.backfillHeadshotSizes(ids);
       let lastJob = null;
       await pollPdfJob(jobId, (job) => {
         lastJob = job;
@@ -303,11 +303,16 @@ export default function CastingArtists() {
                 {backfill.result?.failed ? `, ${backfill.result.failed} failed` : ''}.
               </p>
               {backfill.result?.errors?.length > 0 && (
-                <p className="text-xs text-gray-500 mt-1">First few failures: {backfill.result.errors.map(e => `#${e.id} (${e.error})`).join(', ')}</p>
+                <>
+                  <p className="text-xs text-gray-500 mt-1">First few failures: {backfill.result.errors.map(e => `#${e.id} (${e.error})`).join(', ')}</p>
+                  <button onClick={() => runHeadshotBackfill(backfill.result.errors.map(e => e.id))} className="btn-ghost text-xs mt-2">
+                    ↺ Retry {backfill.result.errors.length} Failed
+                  </button>
+                </>
               )}
             </>
           )}
-          <button onClick={() => setBackfill(null)} className="text-xs text-gray-400 hover:text-gray-600 mt-1">Dismiss</button>
+          <button onClick={() => setBackfill(null)} className="text-xs text-gray-400 hover:text-gray-600 mt-1 ml-2">Dismiss</button>
         </div>
       )}
 
