@@ -2,14 +2,25 @@ import { supabase } from './supabaseClient.js';
 
 const BASE = '/api';
 
+// Reads the current Supabase session's access token. Normally instant (reads
+// from memory/localStorage), but if this fires immediately after a prior
+// request — e.g. uploading a headshot right after creating the artist that
+// owns it — supabase-js can occasionally still be settling its session state
+// (seen in practice on Safari) and briefly return no session at all. One
+// short retry closes that gap instead of silently sending an unauthenticated
+// request that the backend then rejects with "Missing Authorization header".
+async function getAccessToken() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (token) return token;
+    if (attempt === 0) await new Promise(r => setTimeout(r, 300));
+  }
+  return null;
+}
+
 async function req(method, url, body) {
-  // Attach the current Supabase session's access token so the backend's
-  // auth middleware (server.js) can verify who's calling. getSession() reads
-  // from the local in-memory/localStorage session and transparently returns
-  // a refreshed token if supabase-js has already refreshed it in the
-  // background, so this stays correct across long-lived tabs.
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
+  const token = await getAccessToken();
 
   const headers = body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
