@@ -55,7 +55,12 @@ async function ensureMediaBucket() {
 // folder (e.g. "headshots/169..."), mirroring the old uploads/ subfolders.
 async function uploadBufferToStorage(buffer, folder, originalName, mimetype) {
   const safeName = (originalName || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
-  const objectPath = `${folder}/${Date.now()}-${safeName}`;
+  // Date.now() alone isn't unique enough under concurrency: the headshot
+  // backfill job (6 uploads in flight at once, all named 'headshot.jpg')
+  // hit real "resource already exists" collisions whenever two uploads
+  // landed in the same millisecond. The random suffix makes that
+  // effectively impossible regardless of how many uploads run at once.
+  const objectPath = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`;
   const { error } = await supabase.storage.from(MEDIA_BUCKET).upload(objectPath, buffer, {
     contentType: mimetype || 'application/octet-stream',
     upsert: false,
@@ -793,13 +798,16 @@ app.post('/api/artists/:id/headshot', upload.single('headshot'), ah(async (req, 
 app.post('/api/admin/backfill-headshot-sizes', ah(async (req, res) => {
   const jobId = createPdfJob(null);
   res.json({ jobId });
+  // Optional { ids: [...] } lets a retry target only specific artists (e.g.
+  // ones that failed last run) instead of re-processing everyone again.
+  const onlyIds = Array.isArray(req.body?.ids) && req.body.ids.length ? new Set(req.body.ids) : null;
 
   (async () => {
     updatePdfJob(jobId, { stage: 'Finding artists with photos…', percent: 2 });
     const { data: artists, error } = await selectAll(() =>
       supabase.from('artists').select('id, headshot_path').not('headshot_path', 'is', null));
     if (error) throw error;
-    const targets = artists.filter(a => a.headshot_path?.startsWith('http'));
+    const targets = artists.filter(a => a.headshot_path?.startsWith('http') && (!onlyIds || onlyIds.has(a.id)));
 
     let done = 0, resized = 0, failed = 0;
     const errors = [];
@@ -810,7 +818,7 @@ app.post('/api/admin/backfill-headshot-sizes', ah(async (req, res) => {
         const a = targets[next++];
         try {
           const r = await fetch(a.headshot_path);
-          if (!r.ok) throw new Error(`fetch failed (${r.status})`);
+          if (!r.ok) throw new Error(`fetch failed (${r.status}) for ${a.headshot_path}`);
           const origBuf = Buffer.from(await r.arrayBuffer());
           const newBuf = await resizeForWeb(origBuf);
           const { publicUrl } = await uploadBufferToStorage(newBuf, 'headshots', 'headshot.jpg', 'image/jpeg');

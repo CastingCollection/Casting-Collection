@@ -239,7 +239,7 @@ export const api = {
   // One-time maintenance job — resizes every existing artist headshot to the
   // same PDF-quality standard new uploads already get. Returns {jobId}; poll
   // with pollPdfJob (shared with PDF jobs — same job-store shape).
-  backfillHeadshotSizes: () => req('POST', '/admin/backfill-headshot-sizes'),
+  backfillHeadshotSizes: (ids) => req('POST', '/admin/backfill-headshot-sizes', ids ? { ids } : undefined),
 
   // Pencil Dates
   getPencilDates: () => req('GET', '/pencil-dates'),
