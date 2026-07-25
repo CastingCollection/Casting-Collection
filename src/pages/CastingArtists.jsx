@@ -197,7 +197,14 @@ export default function CastingArtists() {
             const blob = new Blob([arr], { type: mime });
             const fd = new FormData();
             fd.append('headshot', blob, 'headshot.jpg');
-            await fetch(`/api/artists/${saved.id}/headshot`, { method: 'POST', body: fd });
+            // Use api.uploadHeadshot() (goes through the shared req() helper,
+            // which attaches the login token) instead of a bare fetch() —
+            // a bare fetch() here never sent an Authorization header at all,
+            // so the server always rejected it with 401 "Missing
+            // Authorization header". Since this was only logged to the
+            // console and not surfaced to the user, the artist still saved
+            // successfully every time, just silently without its photo.
+            await api.uploadHeadshot(saved.id, fd);
           } catch (err) {
             console.error('Headshot upload failed:', err);
           }
@@ -411,7 +418,9 @@ export default function CastingArtists() {
                 const blob = new Blob([arr], { type: mime });
                 const fd = new FormData();
                 fd.append('headshot', blob, 'headshot.jpg');
-                await fetch(`/api/artists/${saved.id}/headshot`, { method: 'POST', body: fd });
+                // Same fix as handleSaveAll above — go through api.uploadHeadshot()
+                // so the request actually carries the login token.
+                await api.uploadHeadshot(saved.id, fd);
               } catch (err) {
                 console.error('Headshot upload failed:', err);
               }
