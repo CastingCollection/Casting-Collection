@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, memo } from 'react';
-import { api } from '../api.js';
+import { api, pollPdfJob } from '../api.js';
 import { useApp } from '../App.jsx';
 import ArtistModal from '../components/ArtistModal.jsx';
 import CropModal from '../components/CropModal.jsx';
@@ -107,6 +107,26 @@ export default function CastingArtists() {
     role: '', agent_name: '', day_rate: '', fitting_rate: '', shoot_date: '', fitting_date: '',
   });
   const setDefault = (k, v) => setDefaults(d => ({ ...d, [k]: v }));
+
+  // ── One-time maintenance: resize every EXISTING headshot to PDF-quality ──
+  // Temporary — meant to be run once, then this button (and the server route
+  // it calls) removed.
+  const [backfill, setBackfill] = useState(null); // { running, stage, percent, result, error }
+  const runHeadshotBackfill = async () => {
+    if (!confirm('Resize every existing artist photo to the smaller PDF-quality size? This changes stored photos for the whole system, not just new uploads. This can take a while for a large roster — you can leave this page open while it runs.')) return;
+    setBackfill({ running: true, stage: 'Starting…', percent: 0 });
+    try {
+      const { jobId } = await api.backfillHeadshotSizes();
+      let lastJob = null;
+      await pollPdfJob(jobId, (job) => {
+        lastJob = job;
+        setBackfill({ running: true, stage: job.stage, percent: job.percent });
+      });
+      setBackfill({ running: false, result: lastJob?.result || null });
+    } catch (err) {
+      setBackfill({ running: false, error: err.message });
+    }
+  };
 
   useEffect(() => {
     api.getAgents().then(setAgents).catch(() => {});
@@ -262,12 +282,34 @@ export default function CastingArtists() {
           {items.length > 0 && (
             <button onClick={handleReset} className="btn-ghost text-sm">↺ Start Over</button>
           )}
+          <button onClick={runHeadshotBackfill} disabled={backfill?.running} className="btn-ghost text-sm" title="One-time: shrink every existing artist photo to the PDF-quality size">
+            {backfill?.running ? `Optimizing… ${backfill.percent || 0}%` : '🔧 Optimize Existing Photos'}
+          </button>
           <label className="btn-gold cursor-pointer">
             + Upload PNGs
             <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/*" multiple onChange={handleFiles} className="hidden" />
           </label>
         </div>
       </div>
+
+      {backfill && !backfill.running && (
+        <div className={`card p-4 text-sm ${backfill.error ? 'ring-2 ring-red-400' : 'ring-2 ring-green-400'}`}>
+          {backfill.error ? (
+            <p className="text-red-600 font-semibold">Photo optimization failed: {backfill.error}</p>
+          ) : (
+            <>
+              <p className="font-semibold text-charcoal">
+                Photo optimization done — resized {backfill.result?.resized ?? 0} of {backfill.result?.total ?? 0} existing photos
+                {backfill.result?.failed ? `, ${backfill.result.failed} failed` : ''}.
+              </p>
+              {backfill.result?.errors?.length > 0 && (
+                <p className="text-xs text-gray-500 mt-1">First few failures: {backfill.result.errors.map(e => `#${e.id} (${e.error})`).join(', ')}</p>
+              )}
+            </>
+          )}
+          <button onClick={() => setBackfill(null)} className="text-xs text-gray-400 hover:text-gray-600 mt-1">Dismiss</button>
+        </div>
+      )}
 
       {/* Batch Defaults Panel */}
       {items.length === 0 && (

@@ -577,7 +577,10 @@ app.use('/api', requireAuth);
 app.get('/api/jobs/:id/status', ah(async (req, res) => {
   const job = pdfJobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json({ status: job.status, stage: job.stage, percent: job.percent, error: job.error });
+  // `result` is only set by non-PDF background jobs (e.g. the headshot
+  // resize backfill below) that need to report a summary once done, rather
+  // than a downloadable file — undefined/omitted for ordinary PDF jobs.
+  res.json({ status: job.status, stage: job.stage, percent: job.percent, error: job.error, result: job.result });
 }));
 
 // Fetched once a job's status is 'done'. 425 ("Too Early") if the caller
@@ -949,6 +952,58 @@ app.post('/api/artists/:id/headshot', upload.single('headshot'), ah(async (req, 
   if (checkErr(res, error)) return;
   if (artist?.headshot_path) await deleteFromStorageByUrl(artist.headshot_path);
   res.json({ headshot_path: publicUrl });
+}));
+
+// One-time maintenance job: re-encode every EXISTING artist headshot to the
+// same PDF-quality standard (480px wide, JPEG q72) new uploads already get.
+// Runs as a background job (same pattern as PDF generation) since this can
+// touch well over a thousand artists and would otherwise blow past Express's
+// request timeout. Bounded concurrency so it doesn't hammer Storage/Postgres
+// with hundreds of simultaneous requests. Intentionally temporary — meant to
+// be run once from the frontend, then this route and its button removed.
+app.post('/api/admin/backfill-headshot-sizes', ah(async (req, res) => {
+  const jobId = createPdfJob(null);
+  res.json({ jobId });
+
+  (async () => {
+    updatePdfJob(jobId, { stage: 'Finding artists with photos…', percent: 2 });
+    const { data: artists, error } = await selectAll(() =>
+      supabase.from('artists').select('id, headshot_path').not('headshot_path', 'is', null));
+    if (error) throw error;
+    const targets = artists.filter(a => a.headshot_path?.startsWith('http'));
+
+    let done = 0, resized = 0, failed = 0;
+    const errors = [];
+    const CONCURRENCY = 6;
+    let next = 0;
+    const worker = async () => {
+      while (next < targets.length) {
+        const a = targets[next++];
+        try {
+          const r = await fetch(a.headshot_path);
+          if (!r.ok) throw new Error(`fetch failed (${r.status})`);
+          const origBuf = Buffer.from(await r.arrayBuffer());
+          const newBuf = await resizeForWeb(origBuf);
+          const { publicUrl } = await uploadBufferToStorage(newBuf, 'headshots', 'headshot.jpg', 'image/jpeg');
+          const oldUrl = a.headshot_path;
+          await supabase.from('artists').update({ headshot_path: publicUrl }).eq('id', a.id);
+          await deleteFromStorageByUrl(oldUrl);
+          resized++;
+        } catch (err) {
+          failed++;
+          if (errors.length < 20) errors.push({ id: a.id, error: err.message });
+        }
+        done++;
+        updatePdfJob(jobId, { stage: `Resizing photos… (${done}/${targets.length})`, percent: 2 + Math.round((done / Math.max(targets.length, 1)) * 96) });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+
+    updatePdfJob(jobId, { status: 'done', percent: 100, stage: 'Done', result: { total: targets.length, resized, failed, errors } });
+  })().catch(err => {
+    console.error('[headshot backfill job]', err);
+    updatePdfJob(jobId, { status: 'error', error: err.message });
+  });
 }));
 
 app.post('/api/artists/:id/duplicate', ah(async (req, res) => {
