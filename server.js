@@ -1477,7 +1477,12 @@ app.delete('/api/shoot-days/:id', ah(async (req, res) => {
 
 // ── Briefs ────────────────────────────────────────────────────────────────────
 app.get('/api/briefs', ah(async (_req, res) => {
-  const { data, error } = await supabase.from('briefs').select('*').order('created_at', { ascending: false });
+  // List view only needs a few small fields to render — select('*') was
+  // pulling every column including mood_board_images/scene_description/
+  // costume_requirements/hair_makeup/restrictions for every row, which is
+  // what made this feel slow even with only a handful of briefs. The full
+  // record is fetched separately (below) when a brief is actually opened.
+  const { data, error } = await supabase.from('briefs').select('id, role_name, created_at, scene_description').order('created_at', { ascending: false });
   if (checkErr(res, error)) return;
   res.json(data);
 }));
@@ -2222,6 +2227,17 @@ app.get('/api/briefs/:id/pdf', ah(async (req, res) => {
     ? (await supabase.from('productions').select('*').eq('id', brief.production_id).maybeSingle()).data
     : null;
   const logoUrl = resolveImageUrl(S.app_logo_path);
+  const moodUrls = moodImages.map(p => resolveImageUrl(p));
+
+  // Prefetch the logo + mood board images server-side and embed as data: URIs
+  // instead of leaving Chromium to fetch them live over the network — same
+  // fix as the roster PDF (see fetchAsDataUri/inlineImages above): a live
+  // Chromium fetch of a Supabase Storage URL is what was causing the logo to
+  // silently fail to render in the downloaded brief PDF.
+  updatePdfJob(jobId, { stage: 'Fetching images…', percent: 15 });
+  const imageMap = await inlineImages([logoUrl, ...moodUrls], 8);
+  const inlinedLogoUrl = logoUrl ? (imageMap.get(logoUrl) || logoUrl) : null;
+
   const formatDate = (iso) => {
     if (!iso) return '';
     const clean = String(iso).trim();
@@ -2231,9 +2247,9 @@ app.get('/api/briefs/:id/pdf', ah(async (req, res) => {
     return d.toLocaleDateString('en-ZA', { weekday:'long', day:'numeric', month:'long', year:'numeric' }).replace(',','');
   };
 
-  const moodHtml = moodImages.map(p => {
-    const url = resolveImageUrl(p);
-    return url ? `<div style="break-inside:avoid;display:inline-block;vertical-align:top;margin:6px"><img src="${url}" style="max-height:260px;max-width:280px;width:auto;height:auto;object-fit:contain;border-radius:4px;background:#f3f4f6;display:block;"></div>` : '';
+  const moodHtml = moodUrls.map(url => {
+    const inlined = url ? (imageMap.get(url) || url) : null;
+    return inlined ? `<div style="break-inside:avoid;display:inline-block;vertical-align:top;margin:6px"><img src="${inlined}" style="max-height:260px;max-width:280px;width:auto;height:auto;object-fit:contain;border-radius:4px;background:#f3f4f6;display:block;"></div>` : '';
   }).join('');
 
   const detailCards = [
@@ -2276,7 +2292,7 @@ body{font-family:Arial,sans-serif;font-size:12px;color:#111;background:#fff;padd
 </style></head><body>
 
 <div style="text-align:center;border-bottom:1px solid #e5e7eb;padding-bottom:20px;margin-bottom:24px">
-  ${logoUrl ? `<img src="${logoUrl}" style="max-height:100px;max-width:280px;width:auto;height:auto;margin:0 auto 10px;display:block">` : ''}
+  ${inlinedLogoUrl ? `<img src="${inlinedLogoUrl}" style="max-height:100px;max-width:280px;width:auto;height:auto;margin:0 auto 10px;display:block">` : ''}
   ${prod?.name ? `<p style="font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:#9ca3af;margin-bottom:5px">Casting Brief</p>` : ''}
   <h1 style="font-size:22px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:#111">${esc(prod?.name || S.app_production || 'Casting Brief')}</h1>
   ${[prod?.bg_director, prod?.contact_number, prod?.email].filter(Boolean).length
@@ -2321,12 +2337,12 @@ ${moodHtml ? (() => {
 
 </body></html>`;
 
-  updatePdfJob(jobId, { stage: 'Rendering PDF…', percent: 40 });
+  updatePdfJob(jobId, { stage: 'Rendering PDF…', percent: 60 });
   const pdf = await withPage(async page => {
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
-    updatePdfJob(jobId, { percent: 60 });
+    updatePdfJob(jobId, { percent: 75 });
     await waitForImages(page);
-    updatePdfJob(jobId, { percent: 85 });
+    updatePdfJob(jobId, { percent: 90 });
     return page.pdf({ format: 'A4', printBackground: true,
       margin: { top:'15mm', bottom:'15mm', left:'15mm', right:'15mm' } });
   });
