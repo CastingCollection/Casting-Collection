@@ -414,7 +414,16 @@ app.get('/api/jobs/:id/status', ah(async (req, res) => {
   // `result` is only set by non-PDF background jobs (e.g. the headshot
   // resize backfill below) that need to report a summary once done, rather
   // than a downloadable file — undefined/omitted for ordinary PDF jobs.
-  res.json({ status: job.status, stage: job.stage, percent: job.percent, error: job.error, result: job.result });
+  try {
+    res.json({ status: job.status, stage: job.stage, percent: job.percent, error: job.error, result: job.result });
+  } catch (err) {
+    // Belt-and-suspenders: if anything ever ends up on the job object that
+    // isn't cleanly JSON-serializable (seen once with the headshot backfill
+    // job), don't let that turn into an opaque poll failure — report it
+    // plainly instead of throwing through res.json().
+    console.error('[jobs status] failed to serialize job', err);
+    res.json({ status: 'error', stage: job.stage, percent: job.percent, error: 'Internal error reporting job status' });
+  }
 }));
 
 // Fetched once a job's status is 'done'. 425 ("Too Early") if the caller
@@ -795,6 +804,20 @@ app.post('/api/artists/:id/headshot', upload.single('headshot'), ah(async (req, 
 // request timeout. Bounded concurrency so it doesn't hammer Storage/Postgres
 // with hundreds of simultaneous requests. Intentionally temporary — meant to
 // be run once from the frontend, then this route and its button removed.
+// Safely extract a plain, guaranteed-JSON-serializable string from whatever
+// got thrown. Some error shapes (Supabase/PostgREST errors, raw fetch
+// failures) can carry circular internal references (e.g. a `cause` chain
+// back to the request/socket) — even though `.message` itself is a normal
+// string, code that logs or re-throws the *whole* error object elsewhere in
+// the chain can trip `JSON.stringify` on that circularity. Always reduce to
+// a plain string this early so nothing circular ever reaches a later
+// res.json() call.
+function errText(err) {
+  if (err == null) return 'Unknown error';
+  if (typeof err === 'string') return err;
+  return String(err.message || err.error || err.hint || err);
+}
+
 app.post('/api/admin/backfill-headshot-sizes', ah(async (req, res) => {
   const jobId = createPdfJob(null);
   res.json({ jobId });
@@ -806,7 +829,7 @@ app.post('/api/admin/backfill-headshot-sizes', ah(async (req, res) => {
     updatePdfJob(jobId, { stage: 'Finding artists with photos…', percent: 2 });
     const { data: artists, error } = await selectAll(() =>
       supabase.from('artists').select('id, headshot_path').not('headshot_path', 'is', null));
-    if (error) throw error;
+    if (error) throw new Error(errText(error));
     const targets = artists.filter(a => a.headshot_path?.startsWith('http') && (!onlyIds || onlyIds.has(a.id)));
 
     let done = 0, resized = 0, failed = 0;
@@ -823,12 +846,13 @@ app.post('/api/admin/backfill-headshot-sizes', ah(async (req, res) => {
           const newBuf = await resizeForWeb(origBuf);
           const { publicUrl } = await uploadBufferToStorage(newBuf, 'headshots', 'headshot.jpg', 'image/jpeg');
           const oldUrl = a.headshot_path;
-          await supabase.from('artists').update({ headshot_path: publicUrl }).eq('id', a.id);
+          const { error: updErr } = await supabase.from('artists').update({ headshot_path: publicUrl }).eq('id', a.id);
+          if (updErr) throw new Error(errText(updErr));
           await deleteFromStorageByUrl(oldUrl);
           resized++;
         } catch (err) {
           failed++;
-          if (errors.length < 20) errors.push({ id: a.id, error: err.message });
+          if (errors.length < 20) errors.push({ id: a.id, error: errText(err) });
         }
         done++;
         updatePdfJob(jobId, { stage: `Resizing photos… (${done}/${targets.length})`, percent: 2 + Math.round((done / Math.max(targets.length, 1)) * 96) });
@@ -839,7 +863,7 @@ app.post('/api/admin/backfill-headshot-sizes', ah(async (req, res) => {
     updatePdfJob(jobId, { status: 'done', percent: 100, stage: 'Done', result: { total: targets.length, resized, failed, errors } });
   })().catch(err => {
     console.error('[headshot backfill job]', err);
-    updatePdfJob(jobId, { status: 'error', error: err.message });
+    updatePdfJob(jobId, { status: 'error', error: errText(err) });
   });
 }));
 
