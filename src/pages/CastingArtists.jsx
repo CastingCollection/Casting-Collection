@@ -179,46 +179,63 @@ export default function CastingArtists() {
     updateItems(prev => prev.filter(it => it.id !== id));
   }, [updateItems]);
 
+  const saveOneItem = async (item) => {
+    try {
+      const saved = await api.createArtist({ ...item.extracted, category: 'new' });
+      if (item.headshotDataUrl) {
+        try {
+          const [header, b64] = item.headshotDataUrl.split(',');
+          const mime = header.match(/:(.*?);/)[1];
+          const bytes = atob(b64);
+          const arr = new Uint8Array(bytes.length);
+          for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+          const blob = new Blob([arr], { type: mime });
+          const fd = new FormData();
+          fd.append('headshot', blob, 'headshot.jpg');
+          // Use api.uploadHeadshot() (goes through the shared req() helper,
+          // which attaches the login token) instead of a bare fetch() —
+          // a bare fetch() here never sent an Authorization header at all,
+          // so the server always rejected it with 401 "Missing
+          // Authorization header". Since this was only logged to the
+          // console and not surfaced to the user, the artist still saved
+          // successfully every time, just silently without its photo.
+          await api.uploadHeadshot(saved.id, fd);
+        } catch (err) {
+          console.error('Headshot upload failed:', err);
+        }
+      }
+      updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'saved' } : it));
+      return true;
+    } catch (err) {
+      if (err.status === 409) {
+        updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'duplicate' } : it));
+      } else {
+        updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'error', error: 'Save failed' } : it));
+      }
+      return false;
+    }
+  };
+
   const handleSaveAll = async () => {
     const ready = itemsRef.current.filter(it => it.status === 'done' && it.extracted.first_name.trim());
     if (!ready.length) return;
     setSaving(true);
+    // Each card was previously saved one at a time (create + upload photo,
+    // both awaited in sequence) — with up to 20 cards that's up to 40
+    // sequential round-trips, noticeably slow. Run several cards through at
+    // once instead (same bounded-concurrency pattern as inlineImages() for
+    // roster PDFs), which cuts wall-clock time roughly by the concurrency
+    // factor without hammering the server with all 20 at once.
+    const CONCURRENCY = 5;
     let count = 0;
-    for (const item of ready) {
-      try {
-        const saved = await api.createArtist({ ...item.extracted, category: 'new' });
-        if (item.headshotDataUrl) {
-          try {
-            const [header, b64] = item.headshotDataUrl.split(',');
-            const mime = header.match(/:(.*?);/)[1];
-            const bytes = atob(b64);
-            const arr = new Uint8Array(bytes.length);
-            for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-            const blob = new Blob([arr], { type: mime });
-            const fd = new FormData();
-            fd.append('headshot', blob, 'headshot.jpg');
-            // Use api.uploadHeadshot() (goes through the shared req() helper,
-            // which attaches the login token) instead of a bare fetch() —
-            // a bare fetch() here never sent an Authorization header at all,
-            // so the server always rejected it with 401 "Missing
-            // Authorization header". Since this was only logged to the
-            // console and not surfaced to the user, the artist still saved
-            // successfully every time, just silently without its photo.
-            await api.uploadHeadshot(saved.id, fd);
-          } catch (err) {
-            console.error('Headshot upload failed:', err);
-          }
-        }
-        count++;
-        updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'saved' } : it));
-      } catch (err) {
-        if (err.status === 409) {
-          updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'duplicate' } : it));
-        } else {
-          updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'error', error: 'Save failed' } : it));
-        }
+    let next = 0;
+    const worker = async () => {
+      while (next < ready.length) {
+        const item = ready[next++];
+        if (await saveOneItem(item)) count++;
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ready.length) }, worker));
     setSavedCount(count);
     setSaving(false);
     refresh();
