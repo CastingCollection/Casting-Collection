@@ -68,6 +68,10 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
   const [tab, setTab] = useState('info');
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [cropSrc, setCropSrc] = useState(null);
+  // For a brand-new artist there's no id yet to attach a headshot to (the
+  // upload endpoint is POST /api/artists/:id/headshot), so the cropped photo
+  // is held here as a Blob and uploaded right after the artist is created.
+  const [pendingHeadshotBlob, setPendingHeadshotBlob] = useState(null);
   const [notes, setNotes] = useState(artist?.notes || '');
   const [dates, setDates] = useState(() => parseDates(artist?.additional_dates));
   const [newDateType, setNewDateType] = useState('pencil');
@@ -93,6 +97,17 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
+  // Uploads a pending (pre-creation) cropped headshot now that the artist
+  // has a real id, and returns the saved record with headshot_path filled in.
+  const uploadPendingHeadshot = async (savedArtist) => {
+    if (!pendingHeadshotBlob || !savedArtist?.id) return savedArtist;
+    const fd = new FormData();
+    fd.append('headshot', pendingHeadshotBlob, 'headshot.jpg');
+    const result = await api.uploadHeadshot(savedArtist.id, fd);
+    setPendingHeadshotBlob(null);
+    return { ...savedArtist, headshot_path: result.headshot_path };
+  };
+
   const handleSave = async () => {
     if (!form.first_name?.trim()) return alert('First name is required');
     setSaving(true);
@@ -101,6 +116,7 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
       let saved;
       if (isNew) {
         saved = await api.createArtist(data);
+        saved = await uploadPendingHeadshot(saved);
       } else {
         saved = await api.updateArtist(artist.id, data);
       }
@@ -110,7 +126,8 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
       if (err.status === 409) {
         if (confirm('An artist with this name already exists. Add anyway?')) {
           const data = { ...form, notes, additional_dates: JSON.stringify(dates) };
-          const saved = await api.createArtist(data, true);
+          let saved = await api.createArtist(data, true);
+          saved = await uploadPendingHeadshot(saved);
           refresh();
           onSaved?.(saved);
         }
@@ -133,7 +150,7 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
 
   const handlePhotoUpload = (e) => {
     const file = e.target.files[0];
-    if (!file || !artist?.id) return;
+    if (!file) return;
     e.target.value = '';
     const reader = new FileReader();
     reader.onload = (ev) => setCropSrc(ev.target.result);
@@ -142,16 +159,23 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
 
   const handleCropConfirm = async (dataUrl) => {
     setCropSrc(null);
-    setUploadingPhoto(true);
     const res = await fetch(dataUrl);
     const blob = await res.blob();
+    if (!artist?.id) {
+      // Brand-new artist — no id to upload against yet. Hold the cropped
+      // photo locally (preview it via the data URL) and upload it once
+      // handleSave() has created the artist and has a real id.
+      setPendingHeadshotBlob(blob);
+      setForm(f => ({ ...f, headshot_path: dataUrl }));
+      return;
+    }
+    setUploadingPhoto(true);
     const fd = new FormData();
     fd.append('headshot', blob, 'headshot.jpg');
     const result = await api.uploadHeadshot(artist.id, fd);
     setForm(f => ({ ...f, headshot_path: result.headshot_path }));
     setUploadingPhoto(false);
     refresh();
-    onUpdated?.();
   };
 
   return (
@@ -191,7 +215,7 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
                     <span className="text-white text-xs font-bold text-center px-2">
                       {uploadingPhoto ? 'Uploading…' : form.headshot_path ? '🔄 Replace Photo' : '📷 Add Photo'}
                     </span>
-                    <input type="file" accept="image/*" className="hidden" onChange={handlePhotoUpload} disabled={!artist?.id || uploadingPhoto} />
+                    <input type="file" accept="image/*" className="hidden" onChange={handlePhotoUpload} disabled={uploadingPhoto} />
                   </label>
                 </div>
                 <div className="flex-1" />
