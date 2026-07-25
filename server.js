@@ -116,6 +116,18 @@ function resolveImageUrl(value) {
 // timing out). Resizing to roster-thumbnail resolution first keeps both the
 // embedded HTML size and Chromium's decoded memory footprint small,
 // regardless of how large the original uploaded photo was.
+// 480px wide / JPEG quality 72 is the "PDF quality" the roster PDF pipeline
+// already used, confirmed to look good in print. Also applied at photo
+// UPLOAD time now (see the artist headshot route below), not just when
+// embedding into a PDF — full phone/DSLR resolution (often 3000-4000px) was
+// never actually needed for a card thumbnail or a 480px PDF embed, and just
+// bloated storage and every artist grid's load time for no visible benefit.
+// .rotate() with no args auto-applies the image's EXIF orientation (common
+// on phone photos) before resizing/re-encoding strips it.
+async function resizeForWeb(buffer) {
+  return sharp(buffer).rotate().resize({ width: 480, withoutEnlargement: true }).jpeg({ quality: 72 }).toBuffer();
+}
+
 async function fetchAsDataUri(url) {
   try {
     const res = await fetch(url);
@@ -124,11 +136,7 @@ async function fetchAsDataUri(url) {
     let type = res.headers.get('content-type') || 'image/jpeg';
     if (type.startsWith('image/') && type !== 'image/svg+xml') {
       try {
-        // 480px wide is generously larger than these ever render at in the
-        // PDF grid (4 columns on an A4 page), even accounting for print DPI.
-        // .rotate() with no args auto-applies the image's EXIF orientation
-        // (common on phone photos) before resizing/re-encoding strips it.
-        buf = await sharp(buf).rotate().resize({ width: 480, withoutEnlargement: true }).jpeg({ quality: 72 }).toBuffer();
+        buf = await resizeForWeb(buf);
         type = 'image/jpeg';
       } catch {
         // Not every file sharp can decode (corrupt upload, unusual format,
@@ -754,7 +762,18 @@ app.delete('/api/artists/:id', ah(async (req, res) => {
 app.post('/api/artists/:id/headshot', upload.single('headshot'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   const { data: artist } = await supabase.from('artists').select('headshot_path').eq('id', req.params.id).maybeSingle();
-  const { publicUrl } = await uploadBufferToStorage(req.file.buffer, 'headshots', req.file.originalname, req.file.mimetype);
+  // Resize to the same "PDF quality" (480px wide, JPEG q72) before storing —
+  // headshots are cropped client-side but never resized, so a photo straight
+  // off a phone/DSLR was being stored (and served to every artist grid)
+  // at full resolution for no visual benefit. Falls back to the original
+  // upload as-is if sharp can't decode it (corrupt file, unusual format).
+  let buffer = req.file.buffer, mimetype = req.file.mimetype, originalname = req.file.originalname;
+  try {
+    buffer = await resizeForWeb(buffer);
+    mimetype = 'image/jpeg';
+    originalname = originalname.replace(/\.[^.]+$/, '') + '.jpg';
+  } catch {}
+  const { publicUrl } = await uploadBufferToStorage(buffer, 'headshots', originalname, mimetype);
   const { error } = await supabase.from('artists').update({ headshot_path: publicUrl }).eq('id', req.params.id);
   if (checkErr(res, error)) return;
   if (artist?.headshot_path) await deleteFromStorageByUrl(artist.headshot_path);
