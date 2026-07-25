@@ -83,10 +83,22 @@ export default function CastingPresentation() {
   };
 
   // ── Save / Load ────────────────────────────────────────────────────────────
-  // Upload any blob: URLs to server, return server path
+  // Upload any blob: URLs to server, return server path. Images that were
+  // already saved come back from the server as full Supabase Storage URLs
+  // (https://...), not the old local "/uploads/..." paths from before the
+  // migration — checking for "/uploads/" here never matched post-migration,
+  // so re-saving an already-loaded presentation always tried to re-upload
+  // every image using its (now-null, since it was never restored) dataUrl,
+  // which the server correctly rejected with "dataUrl required" — that 400
+  // is exactly the "save failed" after loading a presentation. An image only
+  // needs uploading if it's still a local blob: preview that hasn't been
+  // persisted yet; anything already an http(s) URL (or with a serverPath) is
+  // already saved and should just be passed through.
   const persistImage = async (img) => {
     if (!img) return null;
-    if (img.preview?.startsWith('/uploads/')) return img; // already saved
+    if (img.serverPath || /^https?:\/\//.test(img.preview || '')) {
+      return { preview: img.serverPath || img.preview, dataUrl: img.dataUrl || null, serverPath: img.serverPath || img.preview };
+    }
     const result = await api.uploadPresentationImage(img.dataUrl);
     return { preview: result.path, dataUrl: img.dataUrl, serverPath: result.path };
   };
