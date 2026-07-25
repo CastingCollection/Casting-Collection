@@ -113,10 +113,15 @@ export default function CastingArtists() {
   // it calls) removed.
   const [backfill, setBackfill] = useState(null); // { running, stage, percent, result, error }
   const runHeadshotBackfill = async (ids) => {
-    if (!ids && !confirm('Resize every existing artist photo to the smaller PDF-quality size? This changes stored photos for the whole system, not just new uploads. This can take a while for a large roster — you can leave this page open while it runs.')) return;
+    // Defensive guard: only ever forward a real array of numeric ids to the
+    // API. If a caller accidentally passes something else (e.g. a DOM/React
+    // event, from an unwrapped onClick={runHeadshotBackfill}), treat it as
+    // "no ids" rather than letting it reach JSON.stringify downstream.
+    const safeIds = Array.isArray(ids) && ids.length && ids.every(n => typeof n === 'number') ? ids : undefined;
+    if (!safeIds && !confirm('Resize every existing artist photo to the smaller PDF-quality size? This changes stored photos for the whole system, not just new uploads. This can take a while for a large roster — you can leave this page open while it runs.')) return;
     setBackfill({ running: true, stage: 'Starting…', percent: 0 });
     try {
-      const { jobId } = await api.backfillHeadshotSizes(ids);
+      const { jobId } = await api.backfillHeadshotSizes(safeIds);
       let lastJob = null;
       await pollPdfJob(jobId, (job) => {
         lastJob = job;
@@ -282,7 +287,7 @@ export default function CastingArtists() {
           {items.length > 0 && (
             <button onClick={handleReset} className="btn-ghost text-sm">↺ Start Over</button>
           )}
-          <button onClick={runHeadshotBackfill} disabled={backfill?.running} className="btn-ghost text-sm" title="One-time: shrink every existing artist photo to the PDF-quality size">
+          <button onClick={() => runHeadshotBackfill()} disabled={backfill?.running} className="btn-ghost text-sm" title="One-time: shrink every existing artist photo to the PDF-quality size">
             {backfill?.running ? `Optimizing… ${backfill.percent || 0}%` : '🔧 Optimize Existing Photos'}
           </button>
           <label className="btn-gold cursor-pointer">
