@@ -2,7 +2,20 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 
 const VIEW_W = 500;
 const VIEW_H = 500;
-const MIN_CROP = 40;
+const MIN_CROP = 40; // minimum WIDTH in viewport px; height floor is derived from ASPECT
+
+// Headshots are always displayed at a 3:4 (width:height) box everywhere in
+// the app — the grid cards (ArtistCard.jsx's `aspect-[3/4]`) and the roster
+// PDF (`padding-bottom:133%`, i.e. height = 1.333x width = 4/3). Previously
+// this crop tool let you draw ANY freeform rectangle, so unless you happened
+// to eyeball the exact same ratio, the browser/PDF would silently re-crop
+// your selection again at display time via object-fit:cover — invisibly
+// trimming off whatever didn't fit (most often the top of the head, since
+// that's where the extra headroom people tend to leave usually lives).
+// Locking the tool itself to 3:4 means what you select is exactly what you
+// get, everywhere, with no second silent crop.
+const ASPECT = 3 / 4; // width / height
+const MIN_H = MIN_CROP / ASPECT;
 
 // Which edges each handle affects: [left, top, right, bottom]
 const HANDLES = [
@@ -19,13 +32,13 @@ const HANDLES = [
 export default function CropModal({ imageSrc, onConfirm, onClose }) {
   // Image position within viewport (panning)
   const [imgPos, setImgPos] = useState({ x: 0, y: 0 });
-  // Crop box in viewport coords
-  const [crop, setCrop] = useState({ x: 60, y: 30, w: 260, h: 440 });
+  // Crop box in viewport coords — always kept at the locked ASPECT ratio
+  const [crop, setCrop] = useState({ x: 60, y: 30, w: 260, h: 260 / ASPECT });
   const [imgSize, setImgSize] = useState({ w: VIEW_W, h: VIEW_H });
 
   // Refs always hold latest values — used in handleConfirm to avoid stale closure
   const imgPosRef = useRef({ x: 0, y: 0 });
-  const cropRef = useRef({ x: 60, y: 30, w: 260, h: 440 });
+  const cropRef = useRef({ x: 60, y: 30, w: 260, h: 260 / ASPECT });
   const imgSizeRef = useRef({ w: VIEW_W, h: VIEW_H });
 
   const dragging = useRef(null);
@@ -46,9 +59,20 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
     const sw = Math.round(nw * scale);
     const sh = Math.round(nh * scale);
     const pos = { x: Math.round((VIEW_W - sw) / 2), y: Math.round((VIEW_H - sh) / 2) };
-    const cw = Math.round(Math.min(sw * 0.7, 260));
-    const ch = Math.round(Math.min(sh * 0.8, 400));
-    const cropBox = { x: Math.round((VIEW_W - cw) / 2), y: Math.round((VIEW_H - ch) / 2), w: cw, h: ch };
+
+    // Default crop box: as large as possible at the locked ASPECT ratio,
+    // centered on the photo, with a small margin so it starts just inside
+    // the photo's edges rather than touching them.
+    const maxW = sw * 0.92, maxH = sh * 0.92;
+    let cw, ch;
+    if (maxW / maxH > ASPECT) { ch = maxH; cw = ch * ASPECT; }
+    else { cw = maxW; ch = cw / ASPECT; }
+    const cropBox = {
+      x: Math.round(pos.x + (sw - cw) / 2),
+      y: Math.round(pos.y + (sh - ch) / 2),
+      w: Math.round(cw),
+      h: Math.round(ch),
+    };
     syncImgSize({ w: sw, h: sh });
     syncImgPos(pos);
     syncCrop(cropBox);
@@ -77,9 +101,7 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
   // photos aren't square, so the image is letterboxed and doesn't fill the
   // whole viewport). Every interaction below clamps against these bounds,
   // not the viewport, so the box can never sit partly over empty/gray
-  // space. That mismatch (visible crop box extending past the real photo,
-  // while the exported crop is silently clamped back to the actual pixels)
-  // was the root cause of exports not matching what was drawn on screen.
+  // space.
   const getImageBounds = () => {
     const { x: px, y: py } = imgPosRef.current;
     const { w: iw, h: ih } = imgSizeRef.current;
@@ -96,11 +118,12 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
       const newPos = { x: d.imgPos.x + dx, y: d.imgPos.y + dy };
       syncImgPos(newPos);
       // Re-clamp the existing crop box so panning can never leave it
-      // hanging outside the photo's new position.
+      // hanging outside the photo's new position. Size is untouched (it's
+      // already at the locked aspect ratio), only position moves.
       const b = { left: newPos.x, top: newPos.y, right: newPos.x + imgSizeRef.current.w, bottom: newPos.y + imgSizeRef.current.h };
       const c = cropRef.current;
       const w = Math.min(c.w, b.right - b.left);
-      const h = Math.min(c.h, b.bottom - b.top);
+      const h = w / ASPECT;
       const x = Math.max(b.left, Math.min(b.right - w, c.x));
       const y = Math.max(b.top, Math.min(b.bottom - h, c.y));
       if (x !== c.x || y !== c.y || w !== c.w || h !== c.h) syncCrop({ x, y, w, h });
@@ -108,13 +131,23 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
     }
 
     if (d.type === 'draw') {
+      // Anchor is the fixed point where the drag started; the box grows
+      // toward wherever the pointer moves, sized from the horizontal drag
+      // distance with height derived from the locked aspect ratio.
       const b = getImageBounds();
-      const rawX = d.startVX + dx, rawY = d.startVY + dy;
-      const x = Math.max(b.left, Math.min(d.startVX, rawX));
-      const y = Math.max(b.top, Math.min(d.startVY, rawY));
-      const w = Math.min(Math.max(d.startVX, rawX), b.right) - x;
-      const h = Math.min(Math.max(d.startVY, rawY), b.bottom) - y;
-      if (w > MIN_CROP && h > MIN_CROP) syncCrop({ x, y, w, h });
+      const anchorX = d.startVX, anchorY = d.startVY;
+      const dirX = dx >= 0 ? 1 : -1;
+      const dirY = dy >= 0 ? 1 : -1;
+      const wantedW = Math.max(MIN_CROP, Math.abs(dx));
+      const maxW = dirX > 0 ? (b.right - anchorX) : (anchorX - b.left);
+      const maxH = dirY > 0 ? (b.bottom - anchorY) : (anchorY - b.top);
+      const finalW = Math.min(wantedW, maxW, maxH * ASPECT);
+      const finalH = finalW / ASPECT;
+      if (finalW > MIN_CROP && finalH > MIN_H) {
+        const x = dirX > 0 ? anchorX : anchorX - finalW;
+        const y = dirY > 0 ? anchorY : anchorY - finalH;
+        syncCrop({ x, y, w: finalW, h: finalH });
+      }
       return;
     }
 
@@ -132,19 +165,37 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
     if (d.type === 'handle') {
       const [left, top, right, bottom] = d.handle.edges;
       const b = getImageBounds();
-      let { x, y, w, h } = d.crop;
-      // Anchor the edge that ISN'T moving to its original position, so
-      // clamping the moving edge to the photo's bounds can never balloon
-      // the opposite edge outward (the old bug).
-      const anchorLeft = d.crop.x, anchorTop = d.crop.y;
-      const anchorRight = d.crop.x + d.crop.w, anchorBottom = d.crop.y + d.crop.h;
+      const d0 = d.crop;
 
-      if (left)   { x = Math.min(Math.max(b.left, d.crop.x + dx), anchorRight - MIN_CROP); w = anchorRight - x; }
-      if (right)  { w = Math.min(Math.max(MIN_CROP, d.crop.w + dx), b.right - anchorLeft); }
-      if (top)    { y = Math.min(Math.max(b.top, d.crop.y + dy), anchorBottom - MIN_CROP); h = anchorBottom - y; }
-      if (bottom) { h = Math.min(Math.max(MIN_CROP, d.crop.h + dy), b.bottom - anchorTop); }
+      // Drive the resize from whichever axis the handle actually owns, and
+      // derive the other dimension from the locked aspect ratio. Edge
+      // handles (only one of left/top/right/bottom set) grow/shrink
+      // symmetrically about the box's own center on the axis they don't
+      // own, matching how most fixed-aspect croppers behave.
+      let newW, newH;
+      if (left || right) {
+        newW = Math.max(MIN_CROP, d0.w + (right ? dx : -dx));
+        newH = newW / ASPECT;
+      } else {
+        newH = Math.max(MIN_H, d0.h + (bottom ? dy : -dy));
+        newW = newH * ASPECT;
+      }
 
-      syncCrop({ x, y, w, h });
+      const anchorX = left ? d0.x + d0.w : right ? d0.x : d0.x + d0.w / 2;
+      const anchorY = top ? d0.y + d0.h : bottom ? d0.y : d0.y + d0.h / 2;
+
+      // Clamp to the photo's actual bounds, preserving both the anchor and
+      // the aspect ratio — shrink (never balloon past the anchor) if the
+      // requested size doesn't fit.
+      const maxW = left ? (anchorX - b.left) : right ? (b.right - anchorX) : 2 * Math.min(anchorX - b.left, b.right - anchorX);
+      const maxH = top  ? (anchorY - b.top)  : bottom ? (b.bottom - anchorY) : 2 * Math.min(anchorY - b.top, b.bottom - anchorY);
+      const finalW = Math.max(MIN_CROP, Math.min(newW, maxW, maxH * ASPECT));
+      const finalH = finalW / ASPECT;
+
+      const x = left ? anchorX - finalW : right ? anchorX : anchorX - finalW / 2;
+      const y = top ? anchorY - finalH : bottom ? anchorY : anchorY - finalH / 2;
+
+      syncCrop({ x, y, w: finalW, h: finalH });
     }
   }, []);
 
@@ -170,11 +221,8 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
     // the original source. Safari has a long-standing inconsistency where
     // an on-screen <img> auto-rotates a photo per its EXIF orientation tag
     // for display, but a fresh Image()/canvas drawImage() pair doesn't
-    // always apply that same correction — so the pixels actually extracted
-    // could be rotated/offset relative to what was visually selected,
-    // silently cutting off part of the intended crop (e.g. the top of the
-    // head) even though the crop box looked correct on screen. Reusing the
-    // already-rendered element removes that second, inconsistent decode.
+    // always apply that same correction. Reusing the already-rendered
+    // element removes that second, inconsistent decode.
     const imgEl = displayImgRef.current;
     if (!imgEl) return;
     const scaleX = imgEl.naturalWidth  / iw;
@@ -201,7 +249,7 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
         <div className="flex items-center justify-between px-5 py-3 border-b bg-charcoal text-white">
           <div>
             <p className="font-bold text-sm">Crop Headshot</p>
-            <p className="text-xs text-gray-400">Draw new crop area · drag inside crop to pan · drag handles to resize</p>
+            <p className="text-xs text-gray-400">Draw new crop area · drag inside crop to pan · drag handles to resize — locked to headshot proportions</p>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-white text-2xl leading-none">×</button>
         </div>
