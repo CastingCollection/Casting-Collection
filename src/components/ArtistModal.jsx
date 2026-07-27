@@ -74,6 +74,8 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
   const [pendingHeadshotBlob, setPendingHeadshotBlob] = useState(null);
   const [notes, setNotes] = useState(artist?.notes || '');
   const [dates, setDates] = useState(() => parseDates(artist?.additional_dates));
+  const [movingCategory, setMovingCategory] = useState(false);
+  const [categoryMoved, setCategoryMoved] = useState(null); // label of category just moved to
   const [newDateType, setNewDateType] = useState('pencil');
   const [newDateVal, setNewDateVal] = useState('');
   const [newDateLabel, setNewDateLabel] = useState('');
@@ -96,6 +98,29 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
   };
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  // Changing the category dropdown used to just update local form state,
+  // requiring the user to also remember to click "Save Artist" for the move
+  // to actually happen — unlike every other move action in the app (bulk
+  // move, per-card quick-move buttons), which is a single immediate click.
+  // For an existing artist we now persist the category change right away,
+  // matching that pattern, so the move happens the instant it's selected.
+  const handleCategoryChange = async (newCategory) => {
+    set('category', newCategory);
+    setCategoryMoved(null);
+    if (isNew || !artist?.id || newCategory === artist.category) return;
+    setMovingCategory(true);
+    try {
+      await api.bulkCategory([artist.id], newCategory);
+      refresh();
+      setCategoryMoved(CATEGORIES.find(c => c.value === newCategory)?.label || newCategory);
+    } catch (err) {
+      alert('Failed to move artist: ' + err.message);
+      set('category', artist.category); // revert the dropdown on failure
+    } finally {
+      setMovingCategory(false);
+    }
+  };
 
   // Uploads a pending (pre-creation) cropped headshot now that the artist
   // has a real id, and returns the saved record with headshot_path filled in.
@@ -224,9 +249,14 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
               {/* Category */}
               <div>
                 <label className="block text-xs font-semibold mb-1 text-gray-600 uppercase tracking-wide">Category</label>
-                <select className="input-field" value={form.category||'new'} onChange={e => set('category', e.target.value)}>
+                <select className="input-field" value={form.category||'new'} disabled={movingCategory} onChange={e => handleCategoryChange(e.target.value)}>
                   {CATEGORIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </select>
+                {!isNew && (movingCategory || categoryMoved) && (
+                  <p className="text-xs mt-1 font-semibold text-green-600">
+                    {movingCategory ? 'Moving…' : `✓ Moved to ${categoryMoved}`}
+                  </p>
+                )}
               </div>
 
               {/* Core fields */}

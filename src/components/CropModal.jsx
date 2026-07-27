@@ -71,6 +71,20 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
     window.addEventListener('pointerup', handlePointerUp);
   };
 
+  // The crop box must never extend beyond the PHOTO itself — only the
+  // portion of the 500x500 viewport actually covered by the image (most
+  // photos aren't square, so the image is letterboxed and doesn't fill the
+  // whole viewport). Every interaction below clamps against these bounds,
+  // not the viewport, so the box can never sit partly over empty/gray
+  // space. That mismatch (visible crop box extending past the real photo,
+  // while the exported crop is silently clamped back to the actual pixels)
+  // was the root cause of exports not matching what was drawn on screen.
+  const getImageBounds = () => {
+    const { x: px, y: py } = imgPosRef.current;
+    const { w: iw, h: ih } = imgSizeRef.current;
+    return { left: px, top: py, right: px + iw, bottom: py + ih };
+  };
+
   const handlePointerMove = useCallback((e) => {
     const d = dragging.current;
     if (!d) return;
@@ -78,24 +92,37 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
     const dy = e.clientY - d.startY;
 
     if (d.type === 'pan') {
-      syncImgPos({ x: d.imgPos.x + dx, y: d.imgPos.y + dy });
+      const newPos = { x: d.imgPos.x + dx, y: d.imgPos.y + dy };
+      syncImgPos(newPos);
+      // Re-clamp the existing crop box so panning can never leave it
+      // hanging outside the photo's new position.
+      const b = { left: newPos.x, top: newPos.y, right: newPos.x + imgSizeRef.current.w, bottom: newPos.y + imgSizeRef.current.h };
+      const c = cropRef.current;
+      const w = Math.min(c.w, b.right - b.left);
+      const h = Math.min(c.h, b.bottom - b.top);
+      const x = Math.max(b.left, Math.min(b.right - w, c.x));
+      const y = Math.max(b.top, Math.min(b.bottom - h, c.y));
+      if (x !== c.x || y !== c.y || w !== c.w || h !== c.h) syncCrop({ x, y, w, h });
       return;
     }
 
     if (d.type === 'draw') {
-      const x = Math.max(0, Math.min(d.startVX, d.startVX + dx));
-      const y = Math.max(0, Math.min(d.startVY, d.startVY + dy));
-      const w = Math.min(Math.abs(dx), VIEW_W - x);
-      const h = Math.min(Math.abs(dy), VIEW_H - y);
+      const b = getImageBounds();
+      const rawX = d.startVX + dx, rawY = d.startVY + dy;
+      const x = Math.max(b.left, Math.min(d.startVX, rawX));
+      const y = Math.max(b.top, Math.min(d.startVY, rawY));
+      const w = Math.min(Math.max(d.startVX, rawX), b.right) - x;
+      const h = Math.min(Math.max(d.startVY, rawY), b.bottom) - y;
       if (w > MIN_CROP && h > MIN_CROP) syncCrop({ x, y, w, h });
       return;
     }
 
     if (d.type === 'move-crop') {
+      const b = getImageBounds();
       const next = {
         ...d.crop,
-        x: Math.max(0, Math.min(VIEW_W - d.crop.w, d.crop.x + dx)),
-        y: Math.max(0, Math.min(VIEW_H - d.crop.h, d.crop.y + dy)),
+        x: Math.max(b.left, Math.min(b.right - d.crop.w, d.crop.x + dx)),
+        y: Math.max(b.top, Math.min(b.bottom - d.crop.h, d.crop.y + dy)),
       };
       syncCrop(next);
       return;
@@ -103,16 +130,18 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
 
     if (d.type === 'handle') {
       const [left, top, right, bottom] = d.handle.edges;
+      const b = getImageBounds();
       let { x, y, w, h } = d.crop;
+      // Anchor the edge that ISN'T moving to its original position, so
+      // clamping the moving edge to the photo's bounds can never balloon
+      // the opposite edge outward (the old bug).
+      const anchorLeft = d.crop.x, anchorTop = d.crop.y;
+      const anchorRight = d.crop.x + d.crop.w, anchorBottom = d.crop.y + d.crop.h;
 
-      if (left)   { const nw = Math.max(MIN_CROP, w - dx); x = x + (w - nw); w = nw; }
-      if (right)  { w = Math.max(MIN_CROP, w + dx); }
-      if (top)    { const nh = Math.max(MIN_CROP, h - dy); y = y + (h - nh); h = nh; }
-      if (bottom) { h = Math.max(MIN_CROP, h + dy); }
-
-      x = Math.max(0, x); y = Math.max(0, y);
-      w = Math.min(w, VIEW_W - x);
-      h = Math.min(h, VIEW_H - y);
+      if (left)   { x = Math.min(Math.max(b.left, d.crop.x + dx), anchorRight - MIN_CROP); w = anchorRight - x; }
+      if (right)  { w = Math.min(Math.max(MIN_CROP, d.crop.w + dx), b.right - anchorLeft); }
+      if (top)    { y = Math.min(Math.max(b.top, d.crop.y + dy), anchorBottom - MIN_CROP); h = anchorBottom - y; }
+      if (bottom) { h = Math.min(Math.max(MIN_CROP, d.crop.h + dy), b.bottom - anchorTop); }
 
       syncCrop({ x, y, w, h });
     }
