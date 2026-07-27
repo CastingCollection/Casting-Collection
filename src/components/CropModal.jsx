@@ -31,6 +31,7 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
   const dragging = useRef(null);
   const canvasRef = useRef(null);
   const viewportRef = useRef(null);
+  const displayImgRef = useRef(null);
 
   const syncImgPos = (v) => { imgPosRef.current = v; setImgPos(v); };
   const syncCrop   = (v) => { cropRef.current   = v; setCrop(v);   };
@@ -164,22 +165,30 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
     const { x: px, y: py } = imgPosRef.current;
     const { w: iw, h: ih } = imgSizeRef.current;
 
-    const img = new Image();
-    img.onload = () => {
-      const scaleX = img.naturalWidth  / iw;
-      const scaleY = img.naturalHeight / ih;
-      const srcX = Math.max(0, (cx - px) * scaleX);
-      const srcY = Math.max(0, (cy - py) * scaleY);
-      const srcW = Math.min(cw * scaleX, img.naturalWidth  - srcX);
-      const srcH = Math.min(ch * scaleY, img.naturalHeight - srcY);
-      const canvas = canvasRef.current;
-      canvas.width  = Math.round(srcW);
-      canvas.height = Math.round(srcH);
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
-      onConfirm(canvas.toDataURL('image/jpeg', 0.95));
-    };
-    img.src = imageSrc;
+    // Draw from the SAME <img> element the user is actually looking at
+    // while cropping, instead of decoding a second, brand-new Image() from
+    // the original source. Safari has a long-standing inconsistency where
+    // an on-screen <img> auto-rotates a photo per its EXIF orientation tag
+    // for display, but a fresh Image()/canvas drawImage() pair doesn't
+    // always apply that same correction — so the pixels actually extracted
+    // could be rotated/offset relative to what was visually selected,
+    // silently cutting off part of the intended crop (e.g. the top of the
+    // head) even though the crop box looked correct on screen. Reusing the
+    // already-rendered element removes that second, inconsistent decode.
+    const imgEl = displayImgRef.current;
+    if (!imgEl) return;
+    const scaleX = imgEl.naturalWidth  / iw;
+    const scaleY = imgEl.naturalHeight / ih;
+    const srcX = Math.max(0, (cx - px) * scaleX);
+    const srcY = Math.max(0, (cy - py) * scaleY);
+    const srcW = Math.min(cw * scaleX, imgEl.naturalWidth  - srcX);
+    const srcH = Math.min(ch * scaleY, imgEl.naturalHeight - srcY);
+    const canvas = canvasRef.current;
+    canvas.width  = Math.round(srcW);
+    canvas.height = Math.round(srcH);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(imgEl, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
+    onConfirm(canvas.toDataURL('image/jpeg', 0.95));
   };
 
   const hx = (h) => h.x === 'left' ? crop.x : h.x === 'right' ? crop.x + crop.w : crop.x + crop.w / 2;
@@ -220,6 +229,7 @@ export default function CropModal({ imageSrc, onConfirm, onClose }) {
           >
             {/* Image — not stretched, positioned by pan */}
             <img
+              ref={displayImgRef}
               src={imageSrc}
               alt=""
               draggable={false}
