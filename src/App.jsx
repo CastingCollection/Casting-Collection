@@ -66,6 +66,14 @@ export default function App() {
   const moveArtistsWithUndo = async (artists, newCategory) => {
     if (!artists?.length) return;
     const ids = artists.map(a => a.id);
+    const newLabel = CATEGORY_LABELS[newCategory] || newCategory;
+    const who = artists.length === 1
+      ? [artists[0].first_name, artists[0].last_name].filter(Boolean).join(' ') || 'this artist'
+      : `these ${artists.length} artists`;
+    // Confirm before anything actually moves — the Undo toast is a safety
+    // net for a click you meant to make, not a substitute for asking first.
+    if (!confirm(`Move ${who} to ${newLabel}?`)) return false;
+
     await api.bulkCategory(ids, newCategory);
     refresh();
 
@@ -74,15 +82,13 @@ export default function App() {
       const oldCat = a.category || 'new';
       (byOldCategory[oldCat] ||= []).push(a.id);
     });
-    const newLabel = CATEGORY_LABELS[newCategory] || newCategory;
-    const label = artists.length === 1
-      ? `Moved ${[artists[0].first_name, artists[0].last_name].filter(Boolean).join(' ') || 'artist'} to ${newLabel}`
-      : `Moved ${artists.length} artists to ${newLabel}`;
+    const label = artists.length === 1 ? `Moved ${who} to ${newLabel}` : `Moved ${artists.length} artists to ${newLabel}`;
 
     pushUndo(label, async () => {
       await Promise.all(Object.entries(byOldCategory).map(([cat, catIds]) => api.bulkCategory(catIds, cat)));
       refresh();
     });
+    return true;
   };
 
   const pages = {

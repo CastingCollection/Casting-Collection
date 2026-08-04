@@ -111,8 +111,12 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
     if (isNew || !artist?.id || newCategory === artist.category) return;
     setMovingCategory(true);
     try {
-      await moveArtistsWithUndo([artist], newCategory);
-      setCategoryMoved(CATEGORIES.find(c => c.value === newCategory)?.label || newCategory);
+      const moved = await moveArtistsWithUndo([artist], newCategory);
+      if (moved) {
+        setCategoryMoved(CATEGORIES.find(c => c.value === newCategory)?.label || newCategory);
+      } else {
+        set('category', artist.category); // user cancelled the confirm — revert the dropdown
+      }
     } catch (err) {
       alert('Failed to move artist: ' + err.message);
       set('category', artist.category); // revert the dropdown on failure

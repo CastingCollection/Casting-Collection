@@ -206,9 +206,8 @@ export default function Pencilling() {
   const handleBulkMoveCategory = async () => {
     if (!moveTarget || !selected.size) return;
     const artistsToMove = selectedArtistObjects;
-    setSelected(new Set());
-    setMoveTarget('');
-    await moveArtistsWithUndo(artistsToMove, moveTarget);
+    const moved = await moveArtistsWithUndo(artistsToMove, moveTarget);
+    if (moved) { setSelected(new Set()); setMoveTarget(''); }
   };
 
   if (activeCS) {

@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 
-const UNDO_TTL = 8000;
+const UNDO_TTL = 15000;
 
 export function useUndo() {
   const [pending, setPending] = useState(null); // { label, fn }
