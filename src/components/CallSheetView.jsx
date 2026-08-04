@@ -3,8 +3,16 @@ import { api } from '../api.js';
 import { useApp } from '../App.jsx';
 import { usePdfProgress } from '../contexts/PdfProgressContext.jsx';
 
+// All the fields a call-sheet-artist row actually carries. The PUT route
+// that updates a single artist (used to restore state on Undo) always
+// writes every one of these — any field left out of the request body gets
+// reset to null server-side, it's not a partial update. So an Undo restore
+// must always send the artist's full original snapshot, never just the one
+// field that changed, or it would silently wipe the artist's other columns.
+const CS_ARTIST_FIELDS = ['call_time', 'report_to', 'pickup_time', 'pickup_point', 'notes', 'banner_id'];
+
 export default function CallSheetView({ sheetId, onClose }) {
-  const { refresh } = useApp();
+  const { refresh, pushUndo } = useApp();
   const runPdfDownload = usePdfProgress();
   const [sheet, setSheet] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -131,12 +139,29 @@ export default function CallSheetView({ sheetId, onClose }) {
     refresh();
   };
 
+  // Snapshots every relevant field for a set of artists BEFORE a bulk write,
+  // so Undo can put each one back exactly as it was — different artists on
+  // the sheet can have different existing call times/locations, so this
+  // can't just be "set it back to one shared value."
+  const snapshotArtists = (ids) => sheet.artists
+    .filter(a => ids.includes(a.artist_id))
+    .map(a => ({ artist_id: a.artist_id, prev: Object.fromEntries(CS_ARTIST_FIELDS.map(k => [k, a[k] ?? null])) }));
+
+  const restoreSnapshot = async (snapshot) => {
+    await Promise.all(snapshot.map(s => api.updateCallSheetArtist(sheetId, s.artist_id, s.prev)));
+    load();
+  };
+
   const handleCopyToAll = async () => {
     const fields = Object.fromEntries(Object.entries(copyToAll).filter(([,v]) => v));
     if (!Object.keys(fields).length) return;
-    const ids = selectedArtists.size > 0 ? [...selectedArtists] : null;
-    await api.bulkUpdateCallSheetArtists(sheetId, ids, fields);
+    const ids = selectedArtists.size > 0 ? [...selectedArtists] : sheet.artists.map(a => a.artist_id);
+    if (!ids.length) return;
+    const snapshot = snapshotArtists(ids);
+    await api.bulkUpdateCallSheetArtists(sheetId, selectedArtists.size > 0 ? ids : null, fields);
     load();
+    const fieldLabel = Object.keys(fields).map(f => f.replace(/_/g, ' ')).join(', ');
+    pushUndo(`Set ${fieldLabel} for ${ids.length} artist${ids.length !== 1 ? 's' : ''}`, () => restoreSnapshot(snapshot));
   };
 
   const handleSaveArtist = async () => {
@@ -155,11 +180,15 @@ export default function CallSheetView({ sheetId, onClose }) {
     if (!bulkMoveBanner || !selectedArtists.size) return;
     setBulkMoving(true);
     try {
+      const ids = [...selectedArtists];
+      const snapshot = snapshotArtists(ids);
       const bannerId = bulkMoveBanner === '__none__' ? null : Number(bulkMoveBanner);
-      await api.bulkUpdateCallSheetArtists(sheetId, [...selectedArtists], { banner_id: bannerId });
+      const bannerLabel = bulkMoveBanner === '__none__' ? 'No Banner' : (sheet.banners.find(b => b.id === bannerId)?.name || 'that banner');
+      await api.bulkUpdateCallSheetArtists(sheetId, ids, { banner_id: bannerId });
       setBulkMoveBanner('');
       deselectAll();
       load();
+      pushUndo(`Moved ${ids.length} artist${ids.length !== 1 ? 's' : ''} to ${bannerLabel}`, () => restoreSnapshot(snapshot));
     } finally { setBulkMoving(false); }
   };
 
@@ -168,8 +197,10 @@ export default function CallSheetView({ sheetId, onClose }) {
     const target = selectedArtists.size > 0 ? `${selectedArtists.size} selected artist${selectedArtists.size !== 1 ? 's' : ''}` : 'all artists on this sheet';
     if (!confirm(`Clear "${field.replace(/_/g,' ')}" for ${target}?`)) return;
     if (!ids.length) return;
+    const snapshot = snapshotArtists(ids);
     await api.bulkUpdateCallSheetArtists(sheetId, ids, { [field]: '' });
     load();
+    pushUndo(`Cleared ${field.replace(/_/g, ' ')} for ${ids.length} artist${ids.length !== 1 ? 's' : ''}`, () => restoreSnapshot(snapshot));
   };
 
   const handleSaveNote = async (artistId) => {
@@ -182,10 +213,21 @@ export default function CallSheetView({ sheetId, onClose }) {
     if (!bulkMoveSheet || !selectedArtists.size) return;
     setBulkMoving(true);
     try {
-      await api.moveToCallSheet(Number(bulkMoveSheet), sheetId, [...selectedArtists]);
+      const ids = [...selectedArtists];
+      const targetId = Number(bulkMoveSheet);
+      const targetLabel = siblingSheets.find(s => s.id === targetId)?.title || 'another call sheet';
+      await api.moveToCallSheet(targetId, sheetId, ids);
       setBulkMoveSheet('');
       deselectAll();
       load();
+      // Moving between call sheets (not just banners within one) is
+      // reversible by just swapping target/source and moving the same
+      // artist ids back — the move-from route already matches/creates a
+      // banner by name on whichever sheet is the destination.
+      pushUndo(`Moved ${ids.length} artist${ids.length !== 1 ? 's' : ''} to ${targetLabel}`, async () => {
+        await api.moveToCallSheet(sheetId, targetId, ids);
+        load();
+      });
     } finally { setBulkMoving(false); }
   };
 
