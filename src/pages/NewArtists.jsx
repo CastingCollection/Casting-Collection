@@ -99,9 +99,8 @@ export default function NewArtists() {
   const handleBulkMove = async () => {
     if (!moveTarget || selected.size === 0) return;
     const artistsToMove = pool.filter(a => selected.has(a.id));
-    setSelected(new Set());
-    setMoveTarget('');
-    await moveArtistsWithUndo(artistsToMove, moveTarget);
+    const moved = await moveArtistsWithUndo(artistsToMove, moveTarget);
+    if (moved) { setSelected(new Set()); setMoveTarget(''); }
   };
 
   const RATES = Array.from({ length: (5000 - 200) / 50 + 1 }, (_, i) => `R ${200 + i * 50}`);

@@ -25,8 +25,8 @@ export default function NotAvailable() {
   const handleMoveToNew = async () => {
     if (!selected.size) return;
     const artistsToMove = artists.filter(a => selected.has(a.id));
-    setSelected(new Set());
-    await moveArtistsWithUndo(artistsToMove, 'new');
+    const moved = await moveArtistsWithUndo(artistsToMove, 'new');
+    if (moved) setSelected(new Set());
   };
 
   return (
