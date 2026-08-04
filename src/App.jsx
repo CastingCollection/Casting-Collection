@@ -28,16 +28,27 @@ import ZCards from './pages/ZCards.jsx';
 import { api } from './api.js';
 import { PdfProgressProvider } from './contexts/PdfProgressContext.jsx';
 import PdfProgressModal from './components/PdfProgressModal.jsx';
+import { useUndo } from './hooks/useUndo.js';
+import UndoToast from './components/UndoToast.jsx';
 
 export const AppContext = createContext(null);
 
 export function useApp() { return useContext(AppContext); }
+
+const CATEGORY_LABELS = {
+  new: 'New Artists',
+  pencil: 'Pencilling',
+  fitting: 'Fittings',
+  shoot: 'Shoot Dates',
+  not_available: 'Not Available',
+};
 
 export default function App() {
   const [page, setPage] = useState('new-artists');
   const [counts, setCounts] = useState({});
   const [settings, setSettings] = useState({});
   const [refreshKey, setRefreshKey] = useState(0);
+  const { pushUndo, undoPending, executeUndo, dismissUndo } = useUndo();
 
   const refresh = () => setRefreshKey(k => k + 1);
 
@@ -45,6 +56,34 @@ export default function App() {
     api.getArtistCounts().then(setCounts).catch(() => {});
     api.getSettings().then(setSettings).catch(() => {});
   }, [refreshKey]);
+
+  // Shared by every category-move action in the app (the modal's Category
+  // dropdown, per-card quick-move buttons, and bulk "Move" controls) so
+  // moving an artist is always undoable for a few seconds afterward.
+  // `artists` must be the FULL artist objects (not just ids) — we need each
+  // one's current category to know what to restore on undo, since a bulk
+  // selection can in principle span more than one original category.
+  const moveArtistsWithUndo = async (artists, newCategory) => {
+    if (!artists?.length) return;
+    const ids = artists.map(a => a.id);
+    await api.bulkCategory(ids, newCategory);
+    refresh();
+
+    const byOldCategory = {};
+    artists.forEach(a => {
+      const oldCat = a.category || 'new';
+      (byOldCategory[oldCat] ||= []).push(a.id);
+    });
+    const newLabel = CATEGORY_LABELS[newCategory] || newCategory;
+    const label = artists.length === 1
+      ? `Moved ${[artists[0].first_name, artists[0].last_name].filter(Boolean).join(' ') || 'artist'} to ${newLabel}`
+      : `Moved ${artists.length} artists to ${newLabel}`;
+
+    pushUndo(label, async () => {
+      await Promise.all(Object.entries(byOldCategory).map(([cat, catIds]) => api.bulkCategory(catIds, cat)));
+      refresh();
+    });
+  };
 
   const pages = {
     'casting-briefs': <CastingBriefs />,
@@ -62,7 +101,7 @@ export default function App() {
   };
 
   return (
-    <AppContext.Provider value={{ counts, settings, setSettings, refresh, refreshKey }}>
+    <AppContext.Provider value={{ counts, settings, setSettings, refresh, refreshKey, pushUndo, moveArtistsWithUndo }}>
       <PdfProgressProvider>
         <div className="flex h-screen overflow-hidden bg-sidebar">
           <Sidebar activePage={page} onNavigate={setPage} counts={counts} settings={settings} />
@@ -73,6 +112,7 @@ export default function App() {
           </main>
         </div>
         <PdfProgressModal />
+        <UndoToast pending={undoPending} onUndo={executeUndo} onDismiss={dismissUndo} />
       </PdfProgressProvider>
     </AppContext.Provider>
   );

@@ -6,7 +6,7 @@ import SmartSearchBar from '../components/SmartSearchBar.jsx';
 import BulkEditBar from '../components/BulkEditBar.jsx';
 
 export default function NotAvailable() {
-  const { refresh, refreshKey } = useApp();
+  const { refresh, refreshKey, moveArtistsWithUndo } = useApp();
   const [artists, setArtists] = useState([]);
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState(new Set());
@@ -24,9 +24,9 @@ export default function NotAvailable() {
 
   const handleMoveToNew = async () => {
     if (!selected.size) return;
-    await api.bulkCategory([...selected], 'new');
+    const artistsToMove = artists.filter(a => selected.has(a.id));
     setSelected(new Set());
-    refresh();
+    await moveArtistsWithUndo(artistsToMove, 'new');
   };
 
   return (
