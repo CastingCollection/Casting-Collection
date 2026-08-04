@@ -24,7 +24,7 @@ const MOVE_OPTS = [
 ];
 
 export default function AllArtists() {
-  const { refresh, refreshKey } = useApp();
+  const { refresh, refreshKey, moveArtistsWithUndo } = useApp();
   const [artists, setArtists] = useState([]);
   const [q, setQ] = useState('');
   const [cat, setCat] = useState('');
@@ -58,10 +58,10 @@ export default function AllArtists() {
 
   const handleBulkMove = async () => {
     if (!moveTarget || !selected.size) return;
-    await api.bulkCategory([...selected], moveTarget);
+    const artistsToMove = artists.filter(a => selected.has(a.id));
     setSelected(new Set());
     setMoveTarget('');
-    refresh();
+    await moveArtistsWithUndo(artistsToMove, moveTarget);
   };
 
   const handleDuplicate = async (artist) => {

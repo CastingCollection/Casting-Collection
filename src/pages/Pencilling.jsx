@@ -8,7 +8,7 @@ import SmartSearchBar from '../components/SmartSearchBar.jsx';
 import BulkEditBar from '../components/BulkEditBar.jsx';
 
 export default function Pencilling() {
-  const { refresh, refreshKey } = useApp();
+  const { refresh, refreshKey, moveArtistsWithUndo } = useApp();
   const runPdfDownload = usePdfProgress();
   const [pencilArtists, setPencilArtists] = useState([]);
   const [pencilDates, setPencilDates] = useState([]);
@@ -205,10 +205,10 @@ export default function Pencilling() {
 
   const handleBulkMoveCategory = async () => {
     if (!moveTarget || !selected.size) return;
-    await api.bulkCategory([...selected], moveTarget);
+    const artistsToMove = selectedArtistObjects;
     setSelected(new Set());
     setMoveTarget('');
-    refresh();
+    await moveArtistsWithUndo(artistsToMove, moveTarget);
   };
 
   if (activeCS) {

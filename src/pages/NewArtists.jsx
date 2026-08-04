@@ -12,7 +12,7 @@ const MOVE_OPTIONS = [
 ];
 
 export default function NewArtists() {
-  const { refresh, refreshKey } = useApp();
+  const { refresh, refreshKey, moveArtistsWithUndo } = useApp();
   const [pool, setPool] = useState([]);   // full list, fetched once on mount/refresh
   const [q, setQ] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -98,10 +98,10 @@ export default function NewArtists() {
 
   const handleBulkMove = async () => {
     if (!moveTarget || selected.size === 0) return;
-    await api.bulkCategory([...selected], moveTarget);
+    const artistsToMove = pool.filter(a => selected.has(a.id));
     setSelected(new Set());
     setMoveTarget('');
-    refresh();
+    await moveArtistsWithUndo(artistsToMove, moveTarget);
   };
 
   const RATES = Array.from({ length: (5000 - 200) / 50 + 1 }, (_, i) => `R ${200 + i * 50}`);
@@ -256,8 +256,7 @@ export default function NewArtists() {
                 label: o.label,
                 className: 'bg-gray-100 hover:bg-gold/20 text-gray-700 text-xs',
                 onClick: async (artist) => {
-                  await api.bulkCategory([artist.id], o.value);
-                  refresh();
+                  await moveArtistsWithUndo([artist], o.value);
                 },
               }))}
             />

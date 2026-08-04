@@ -54,7 +54,7 @@ const parseDates = (val) => {
 };
 
 export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
-  const { refresh } = useApp();
+  const { refresh, moveArtistsWithUndo } = useApp();
   const isNew = !artist?.id;
   const [form, setForm] = useState(artist || { category: 'new' });
   const [saving, setSaving] = useState(false);
@@ -111,8 +111,7 @@ export default function ArtistModal({ artist, onClose, onSaved, onDeleted }) {
     if (isNew || !artist?.id || newCategory === artist.category) return;
     setMovingCategory(true);
     try {
-      await api.bulkCategory([artist.id], newCategory);
-      refresh();
+      await moveArtistsWithUndo([artist], newCategory);
       setCategoryMoved(CATEGORIES.find(c => c.value === newCategory)?.label || newCategory);
     } catch (err) {
       alert('Failed to move artist: ' + err.message);

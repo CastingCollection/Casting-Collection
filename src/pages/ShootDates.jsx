@@ -8,7 +8,7 @@ import SmartSearchBar from '../components/SmartSearchBar.jsx';
 import BulkEditBar from '../components/BulkEditBar.jsx';
 
 export default function ShootDates() {
-  const { refresh, refreshKey } = useApp();
+  const { refresh, refreshKey, moveArtistsWithUndo } = useApp();
   const runPdfDownload = usePdfProgress();
   const [artists, setArtists] = useState([]);
   const [callSheets, setCallSheets] = useState([]);
@@ -94,10 +94,10 @@ export default function ShootDates() {
 
   const handleBulkMoveCategory = async () => {
     if (!moveTarget || !selected.size) return;
-    await api.bulkCategory([...selected], moveTarget);
+    const artistsToMove = artists.filter(a => selected.has(a.id));
     setSelected(new Set());
     setMoveTarget('');
-    refresh();
+    await moveArtistsWithUndo(artistsToMove, moveTarget);
   };
 
   const openCreateCS = () => {
