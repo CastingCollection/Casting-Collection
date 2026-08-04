@@ -427,12 +427,14 @@ export default function CallSheetView({ sheetId, onClose }) {
       })
     : [];
 
+  const SEARCH_HIGHLIGHT_CLASSES = ['ring-2', 'ring-blue-800', 'ring-inset', 'bg-blue-100'];
+
   const scrollToArtist = (artistId) => {
     const el = document.getElementById(`csa-row-${artistId}`);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      el.classList.add('ring-2', 'ring-gold', 'ring-inset');
-      setTimeout(() => el.classList.remove('ring-2', 'ring-gold', 'ring-inset'), 2000);
+      el.classList.add(...SEARCH_HIGHLIGHT_CLASSES);
+      setTimeout(() => el.classList.remove(...SEARCH_HIGHLIGHT_CLASSES), 2500);
     }
     setSearchQ('');
     setSearchOpen(false);
