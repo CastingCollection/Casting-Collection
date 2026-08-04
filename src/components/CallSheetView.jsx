@@ -159,6 +159,7 @@ export default function CallSheetView({ sheetId, onClose }) {
     if (!ids.length) return;
     const snapshot = snapshotArtists(ids);
     await api.bulkUpdateCallSheetArtists(sheetId, selectedArtists.size > 0 ? ids : null, fields);
+    deselectAll();
     load();
     const fieldLabel = Object.keys(fields).map(f => f.replace(/_/g, ' ')).join(', ');
     pushUndo(`Set ${fieldLabel} for ${ids.length} artist${ids.length !== 1 ? 's' : ''}`, () => restoreSnapshot(snapshot));
@@ -199,6 +200,7 @@ export default function CallSheetView({ sheetId, onClose }) {
     if (!ids.length) return;
     const snapshot = snapshotArtists(ids);
     await api.bulkUpdateCallSheetArtists(sheetId, ids, { [field]: '' });
+    deselectAll();
     load();
     pushUndo(`Cleared ${field.replace(/_/g, ' ')} for ${ids.length} artist${ids.length !== 1 ? 's' : ''}`, () => restoreSnapshot(snapshot));
   };
