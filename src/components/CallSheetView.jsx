@@ -372,7 +372,7 @@ export default function CallSheetView({ sheetId, onClose }) {
         </td>
         <td className="px-3 py-2 font-semibold text-sm cursor-pointer hover:text-gold" onClick={() => { setSearchQ(fullName); scrollToArtist(a.artist_id); }}>{fullName}</td>
         <td className="px-3 py-2 text-sm text-gray-600">{a.agent_name}</td>
-        <td className="px-3 py-2 text-sm cursor-pointer hover:text-gold" onClick={() => { if (a.role) { setSearchQ(a.role); setSearchOpen(true); } }}>{a.role}</td>
+        <td className="px-3 py-2 text-sm cursor-pointer hover:text-gold" title={a.role ? `Select all "${a.role}" artists` : undefined} onClick={() => { if (a.role) selectByRole((sheet.artists||[]).filter(x => x.role === a.role).map(x => x.artist_id)); }}>{a.role}</td>
         {isShoot ? (
           <>
             {visCols.includes('pickup_point') && <td className="px-3 py-2 text-sm">{isEditing ? <input className="input-field py-1 text-xs" value={artistForm.pickup_point||''} onChange={e=>setArtistForm(f=>({...f,pickup_point:e.target.value}))} /> : a.pickup_point}</td>}
@@ -439,10 +439,31 @@ export default function CallSheetView({ sheetId, onClose }) {
       })
     : [];
 
+  // Group role matches so searching (or clicking) a role can select every
+  // artist who shares it at once, instead of jumping to one artist at a time.
+  const roleMatches = searchQ.trim().length > 1
+    ? (() => {
+        const q = searchQ.toLowerCase();
+        const byRole = {};
+        (sheet.artists || []).forEach(a => {
+          if (a.role && a.role.toLowerCase().includes(q)) (byRole[a.role] ||= []).push(a.artist_id);
+        });
+        return Object.entries(byRole).map(([role, ids]) => ({ role, ids }));
+      })()
+    : [];
+
   const scrollToArtist = (artistId) => {
     const el = document.getElementById(`csa-row-${artistId}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setHighlightedArtistId(artistId);
+    setSearchQ('');
+    setSearchOpen(false);
+  };
+
+  // Selects (checks) every artist with the given role so they can immediately
+  // be bulk-allocated a call time, location, or banner together.
+  const selectByRole = (ids) => {
+    selectAllArtists(ids);
     setSearchQ('');
     setSearchOpen(false);
   };
@@ -525,8 +546,19 @@ export default function CallSheetView({ sheetId, onClose }) {
                 {searchQ && (
                   <button onClick={() => { setSearchQ(''); setSearchOpen(false); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs">✕</button>
                 )}
-                {searchOpen && searchMatches.length > 0 && (
+                {searchOpen && (searchMatches.length > 0 || roleMatches.length > 0) && (
                   <div className="absolute top-full left-0 mt-1 w-72 bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-64 overflow-y-auto">
+                    {roleMatches.map(r => (
+                      <button
+                        key={`role-${r.role}`}
+                        onMouseDown={() => selectByRole(r.ids)}
+                        className="w-full text-left px-3 py-2 hover:bg-gold/10 border-b border-gray-50 last:border-0 flex items-center justify-between gap-2"
+                        title="Select all artists with this role"
+                      >
+                        <span className="text-sm font-semibold text-charcoal">{r.role}</span>
+                        <span className="text-xs bg-gold/20 text-gold-dark font-bold px-2 py-0.5 rounded-full whitespace-nowrap">Role · {r.ids.length} artist{r.ids.length !== 1 ? 's' : ''}</span>
+                      </button>
+                    ))}
                     {searchMatches.map(a => (
                       <button
                         key={a.artist_id}
@@ -539,7 +571,7 @@ export default function CallSheetView({ sheetId, onClose }) {
                     ))}
                   </div>
                 )}
-                {searchOpen && searchQ.trim().length > 1 && searchMatches.length === 0 && (
+                {searchOpen && searchQ.trim().length > 1 && searchMatches.length === 0 && roleMatches.length === 0 && (
                   <div className="absolute top-full left-0 mt-1 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-50 px-3 py-2 text-xs text-gray-400">
                     No matches found
                   </div>
