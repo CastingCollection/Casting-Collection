@@ -41,21 +41,22 @@ export default function CallSheetView({ sheetId, onClose }) {
   const [expandedSections, setExpandedSections] = useState(new Set());
   const toggleSection = (key) => setExpandedSections(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
 
-  // Set by the search dropdown so the found artist's row stays visibly
-  // highlighted until the user actually checks it (rather than fading on a
-  // timer, which made it easy to lose track of the row again on a long
-  // sheet before you'd gotten to it).
-  const [highlightedArtistId, setHighlightedArtistId] = useState(null);
+  // Set by the search dropdown so found artists' rows stay visibly
+  // highlighted — a Set, not a single id, so multiple people found via
+  // separate searches can all stay lit up at once. The highlight now
+  // survives checking the box (you're often finding several people in a
+  // row and need to keep seeing who's left) and only clears once the
+  // group's bulk action actually runs (deselectAll), or you clear the
+  // selection yourself.
+  const [highlightedArtistIds, setHighlightedArtistIds] = useState(() => new Set());
 
   const toggleSelectArtist = (id) => {
-    if (id === highlightedArtistId) setHighlightedArtistId(null);
     setSelectedArtists(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   };
   const selectAllArtists  = (ids) => {
-    if (highlightedArtistId !== null && ids.includes(highlightedArtistId)) setHighlightedArtistId(null);
     setSelectedArtists(s => { const n = new Set(s); ids.forEach(id => n.add(id)); return n; });
   };
-  const deselectAll       = () => setSelectedArtists(new Set());
+  const deselectAll       = () => { setSelectedArtists(new Set()); setHighlightedArtistIds(new Set()); };
 
   const load = async () => {
     const data = await api.getCallSheet(sheetId);
@@ -365,7 +366,7 @@ export default function CallSheetView({ sheetId, onClose }) {
     const isEditing = editingArtist === a.artist_id;
     const fullName = [a.first_name, a.last_name].filter(Boolean).join(' ');
     return (
-      <tr id={`csa-row-${a.artist_id}`} key={a.artist_id} className={`border-b border-gray-100 hover:bg-amber-100/70 ${highlightedArtistId === a.artist_id ? 'ring-2 ring-blue-800 ring-inset bg-blue-100' : selectedArtists.has(a.artist_id) ? 'bg-gold/5' : ''}`}>
+      <tr id={`csa-row-${a.artist_id}`} key={a.artist_id} className={`border-b border-gray-100 hover:bg-amber-100/70 ${highlightedArtistIds.has(a.artist_id) ? 'ring-2 ring-blue-800 ring-inset bg-blue-100' : selectedArtists.has(a.artist_id) ? 'bg-gold/5' : ''}`}>
         <td className="px-2 py-2 w-8">
           <input type="checkbox" checked={selectedArtists.has(a.artist_id)} onChange={() => toggleSelectArtist(a.artist_id)}
             className="w-4 h-4 accent-gold cursor-pointer" />
@@ -455,15 +456,17 @@ export default function CallSheetView({ sheetId, onClose }) {
   const scrollToArtist = (artistId) => {
     const el = document.getElementById(`csa-row-${artistId}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    setHighlightedArtistId(artistId);
+    setHighlightedArtistIds(s => new Set(s).add(artistId));
     setSearchQ('');
     setSearchOpen(false);
   };
 
   // Selects (checks) every artist with the given role so they can immediately
-  // be bulk-allocated a call time, location, or banner together.
+  // be bulk-allocated a call time, location, or banner together. Highlighted
+  // too, same as a name match, so the group stays visible until moved.
   const selectByRole = (ids) => {
     selectAllArtists(ids);
+    setHighlightedArtistIds(s => { const n = new Set(s); ids.forEach(id => n.add(id)); return n; });
     setSearchQ('');
     setSearchOpen(false);
   };
