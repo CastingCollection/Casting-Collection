@@ -10,6 +10,7 @@ import zlib from 'zlib';
 import sharp from 'sharp';
 import { randomUUID } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
+import archiver from 'archiver';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -2757,6 +2758,125 @@ body{font-family:Arial,sans-serif;background:#fff;width:${PAGE_W}px}
   });
 }));
 
+// ── Archive & reset (moving to a new job) ───────────────────────────────────
+// Every table's data plus every file in Storage, so JP can keep a full
+// offline copy of one job's data before wiping the app clean for the next.
+const ARCHIVE_TABLES = [
+  'agents', 'artists', 'banners', 'briefs', 'call_sheet_artists', 'call_sheets',
+  'fitting_dates', 'pencil_date_artists', 'pencil_dates', 'presentations',
+  'productions', 'roles_to_fit', 'settings', 'shoot_days', 'zcards',
+];
+
+// Recursively walk the media bucket. Supabase Storage's list() returns
+// folders as entries with id === null (no file metadata) — recurse into
+// those, collect the rest as real object paths.
+async function listMediaObjects(prefix = '') {
+  const { data, error } = await supabase.storage.from(MEDIA_BUCKET).list(prefix, {
+    limit: 1000, sortBy: { column: 'name', order: 'asc' },
+  });
+  if (error) throw error;
+  let out = [];
+  for (const item of data || []) {
+    const itemPath = prefix ? `${prefix}/${item.name}` : item.name;
+    if (item.id === null) out = out.concat(await listMediaObjects(itemPath));
+    else out.push(itemPath);
+  }
+  return out;
+}
+
+// GET /api/admin/export-archive — streams a zip of every table (as JSON) and
+// every stored file (headshots, logos, mood-board images, z-card photos),
+// so it can be downloaded straight from the browser and kept anywhere.
+app.get('/api/admin/export-archive', ah(async (req, res) => {
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="casting-collection-archive-${stamp}.zip"`);
+
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', err => { console.error('[export-archive]', err); res.status(500).end(); });
+  archive.pipe(res);
+
+  const manifest = { exportedAt: new Date().toISOString(), tables: {}, media: { total: 0, downloaded: 0, failed: 0 } };
+
+  for (const table of ARCHIVE_TABLES) {
+    const { data, error } = await selectAll(() => supabase.from(table).select('*'));
+    if (error) { manifest.tables[table] = { error: error.message }; continue; }
+    manifest.tables[table] = { rows: data.length };
+    archive.append(JSON.stringify(data, null, 2), { name: `data/${table}.json` });
+  }
+
+  let mediaPaths = [];
+  try { mediaPaths = await listMediaObjects(''); }
+  catch (e) { manifest.media.listError = e.message; }
+  manifest.media.total = mediaPaths.length;
+
+  for (const objPath of mediaPaths) {
+    try {
+      const { data, error } = await supabase.storage.from(MEDIA_BUCKET).download(objPath);
+      if (error) throw error;
+      const buf = Buffer.from(await data.arrayBuffer());
+      archive.append(buf, { name: `media/${objPath}` });
+      manifest.media.downloaded++;
+    } catch (e) {
+      manifest.media.failed++;
+      console.error(`[export-archive] failed to download ${objPath}:`, e.message);
+    }
+  }
+
+  archive.append(JSON.stringify(manifest, null, 2), { name: 'MANIFEST.json' });
+  await archive.finalize();
+}));
+
+// Child-to-parent order so foreign-key relationships don't block a delete
+// even if a cascade isn't set up at the DB level for some pair.
+const RESET_TABLE_ORDER = [
+  'call_sheet_artists', 'pencil_date_artists', 'banners',
+  'call_sheets', 'pencil_dates', 'fitting_dates', 'shoot_days', 'briefs',
+  'zcards', 'presentations', 'roles_to_fit',
+  'artists', 'productions', 'agents',
+];
+// Deliberately NOT included: 'settings' (app logo / footer notes / column
+// prefs aren't job-specific "data" the way artists and call sheets are —
+// leaving it means the app doesn't lose its branding when reused).
+
+// POST /api/admin/reset-for-new-job — wipes every job-specific table and every
+// file in Storage. Requires an exact confirmation string in the body so this
+// can never fire from a stray click; only ever called by JP's own browser
+// after he's downloaded and checked the archive above.
+app.post('/api/admin/reset-for-new-job', ah(async (req, res) => {
+  if (req.body?.confirm !== 'RESET') {
+    return res.status(400).json({ error: 'Missing or incorrect confirmation. Send { "confirm": "RESET" } to proceed.' });
+  }
+
+  const report = { tables: {}, media: { total: 0, removed: 0, failed: 0 } };
+
+  for (const table of RESET_TABLE_ORDER) {
+    try {
+      const { data, error } = await supabase.from(table).delete().gte('id', 0).select('id');
+      if (error) throw error;
+      report.tables[table] = { deleted: (data || []).length };
+    } catch (e) {
+      report.tables[table] = { error: e.message };
+    }
+  }
+
+  try {
+    const mediaPaths = await listMediaObjects('');
+    report.media.total = mediaPaths.length;
+    // Storage remove() takes a batch of paths; chunk to stay well under any
+    // request-size limit.
+    for (let i = 0; i < mediaPaths.length; i += 100) {
+      const chunk = mediaPaths.slice(i, i + 100);
+      const { error } = await supabase.storage.from(MEDIA_BUCKET).remove(chunk);
+      if (error) { report.media.failed += chunk.length; }
+      else { report.media.removed += chunk.length; }
+    }
+  } catch (e) {
+    report.media.listError = e.message;
+  }
+
+  res.json({ ok: true, report });
+}));
 
 // ── SPA fallback (serve dist in prod) ────────────────────────────────────────
 const distPath = path.join(__dirname, 'dist');
