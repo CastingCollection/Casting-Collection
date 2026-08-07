@@ -195,6 +195,10 @@ export const api = {
   saveSettings: (data) => req('PUT', '/settings', data),
   uploadLogo: (fd) => req('POST', '/settings/logo', fd),
 
+  // Archive & reset (moving to a new job)
+  exportArchive: () => downloadFile('/api/admin/export-archive', `casting-collection-archive-${new Date().toISOString().slice(0, 10)}.zip`),
+  resetForNewJob: () => req('POST', '/admin/reset-for-new-job', { confirm: 'RESET' }),
+
   // Productions
   getProductions: () => req('GET', '/productions'),
   createProduction: (d) => req('POST', '/productions', d),
